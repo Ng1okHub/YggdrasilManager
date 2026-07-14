@@ -1,0 +1,67 @@
+package ng1ok.yggdrasilmanager
+
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.verify
+import kotlinx.coroutines.test.runTest
+import ng1ok.yggdrasilmanager.data.YggdrasilRepository
+import ng1ok.yggdrasilmanager.native.HwbpEventCallback
+import ng1ok.yggdrasilmanager.native.YggdrasilNativeApi
+import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
+import org.junit.Assert.assertTrue
+import org.junit.Assert.assertFalse
+import org.junit.Before
+import org.junit.Test
+
+class RepositoryTest {
+    private lateinit var mockNative: YggdrasilNativeApi
+    private lateinit var repo: YggdrasilRepository
+
+    @Before
+    fun setup() {
+        mockNative = mockk(relaxed = true)
+        repo = YggdrasilRepository(mockNative)
+    }
+
+    @Test
+    fun checkAvailable_returnsTrue_whenNativeReturnsTrue() = runTest {
+        every { mockNative.checkAvailable() } returns true
+        assertTrue(repo.checkAvailable())
+    }
+
+    @Test
+    fun checkAvailable_returnsFalse_whenNativeReturnsFalse() = runTest {
+        every { mockNative.checkAvailable() } returns false
+        assertFalse(repo.checkAvailable())
+    }
+
+    @Test
+    fun hwbpObserve_returnsSuccess_whenNativeReturns0() = runTest {
+        every { mockNative.hwbpObserve(any(), any(), any(), any(), any(), any()) } returns 0
+        val params = HwbpObserveParams(pid = 1234, targetAddr = 0x1000L, mode = 1, len = 4, flags = 0, stackSize = 4096)
+        val result = repo.hwbpObserve(params)
+        assertTrue(result.isSuccess)
+    }
+
+    @Test
+    fun hwbpObserve_returnsFailure_whenNativeReturnsNegative() = runTest {
+        every { mockNative.hwbpObserve(any(), any(), any(), any(), any(), any()) } returns -13
+        val params = HwbpObserveParams(pid = 1234, targetAddr = 0x1000L, mode = 1, len = 4, flags = 0, stackSize = 4096)
+        val result = repo.hwbpObserve(params)
+        assertTrue(result.isFailure)
+    }
+
+    @Test
+    fun setHideDbg_global_callsNativeWithoutUid() = runTest {
+        every { mockNative.hideDbg(any(), any(), any()) } returns 0
+        repo.setHideDbg(enable = true, uid = null)
+        verify { mockNative.hideDbg(enable = true, hasUid = false, uid = 0) }
+    }
+
+    @Test
+    fun setHideDbg_perUid_callsNativeWithUid() = runTest {
+        every { mockNative.hideDbg(any(), any(), any()) } returns 0
+        repo.setHideDbg(enable = true, uid = 10086)
+        verify { mockNative.hideDbg(enable = true, hasUid = true, uid = 10086) }
+    }
+}
