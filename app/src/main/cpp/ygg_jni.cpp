@@ -70,6 +70,11 @@ static void *listen_thread(void *) {
     JNIEnv *env = nullptr;
     g_jvm->AttachCurrentThread(&env, nullptr);
 
+    if (!g_on_event_mid) {
+        g_jvm->DetachCurrentThread();
+        return nullptr;
+    }
+
     EventRecord rec;
     struct ygg_hwbp_read_event_request req = {};
     req.buffer      = &rec;
@@ -99,6 +104,10 @@ static void *listen_thread(void *) {
             (jlong)h->regs.pc, (jlong)h->regs.sp,
             regs);
 
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+        }
+
         env->DeleteLocalRef(comm);
         env->DeleteLocalRef(regs);
     }
@@ -119,20 +128,21 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hwbpStartListen(
         "(JJIILjava/lang/String;IIIJJJ[J)V");
 
     g_stop.store(false);
-    pthread_create(&g_listen_thread, nullptr, listen_thread, nullptr);
+    if (pthread_create(&g_listen_thread, nullptr, listen_thread, nullptr) != 0) {
+        env->DeleteGlobalRef(g_callback_ref);
+        g_callback_ref = nullptr;
+    }
 }
 
 extern "C" JNIEXPORT void JNICALL
-Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hwbpStopListen(JNIEnv *, jobject) {
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hwbpStopListen(JNIEnv *env, jobject) {
     g_stop.store(true);
     if (g_listen_thread) {
         pthread_join(g_listen_thread, nullptr);
         g_listen_thread = 0;
     }
-    if (g_callback_ref && g_jvm) {
-        JNIEnv *env = nullptr;
-        g_jvm->GetEnv((void**)&env, JNI_VERSION_1_6);
-        if (env) env->DeleteGlobalRef(g_callback_ref);
+    if (g_callback_ref) {
+        env->DeleteGlobalRef(g_callback_ref);
         g_callback_ref = nullptr;
     }
 }
