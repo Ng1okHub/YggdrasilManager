@@ -91,8 +91,10 @@ static void *listen_thread(void *) {
         const struct ygg_hwbp_event_header *h = &rec.header;
         if ((uint32_t)ret < sizeof(*h) || h->magic != YGG_HWBP_EVENT_MAGIC) continue;
 
-        jstring comm  = env->NewStringUTF(h->comm);
+        jstring comm = env->NewStringUTF(h->comm);
+        if (!comm) { env->ExceptionClear(); continue; }
         jlongArray regs = env->NewLongArray(31);
+        if (!regs) { env->DeleteLocalRef(comm); env->ExceptionClear(); continue; }
         env->SetLongArrayRegion(regs, 0, 31, (const jlong *)h->regs.regs);
 
         env->CallVoidMethod(g_callback_ref, g_on_event_mid,

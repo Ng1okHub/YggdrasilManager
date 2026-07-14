@@ -46,7 +46,7 @@ class HomeViewModelTest {
     }
 
     @Test
-    fun initialState_isLoading() {
+    fun initialState_loading_isFalse() {
         assertEquals(HomeUiState(), vm.uiState.value)
     }
 }

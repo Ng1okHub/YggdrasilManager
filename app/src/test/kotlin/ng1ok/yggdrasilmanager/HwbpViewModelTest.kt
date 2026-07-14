@@ -62,6 +62,10 @@ class HwbpViewModelTest {
 
     @Test
     fun clearEvents_emptiesEventList() = runTest {
+        repeat(3) { i ->
+            vm.appendEvent(HwbpEvent(i.toLong(), 0L, i, i, "proc$i", 1, 4, 0, 0x1000L, 0L, 0L, LongArray(31)))
+        }
+        assertEquals(3, vm.events.value.size)
         vm.clearEvents()
         assertEquals(0, vm.events.value.size)
     }
