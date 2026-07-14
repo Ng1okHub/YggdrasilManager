@@ -1,7 +1,10 @@
 package ng1ok.yggdrasilmanager.ui.home
 
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -25,6 +28,12 @@ class HomeViewModel(
             _uiState.value = _uiState.value.copy(loading = true)
             val available = if (rootGranted) repo.checkAvailable() else false
             _uiState.value = HomeUiState(rootGranted = rootGranted, moduleAvailable = available)
+        }
+    }
+
+    companion object {
+        val Factory: ViewModelProvider.Factory = viewModelFactory {
+            initializer { HomeViewModel() }
         }
     }
 }

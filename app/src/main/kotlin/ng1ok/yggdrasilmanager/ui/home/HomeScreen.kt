@@ -13,7 +13,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import com.topjohnwu.superuser.Shell
 
 @Composable
-fun HomeScreen(vm: HomeViewModel = viewModel()) {
+fun HomeScreen(vm: HomeViewModel = viewModel(factory = HomeViewModel.Factory)) {
     val state by vm.uiState.collectAsState()
 
     LaunchedEffect(Unit) {
