@@ -147,6 +147,32 @@ class HideDbgViewModelTest {
     }
 
     @Test
+    fun refreshFailure_retainsLoadedAppsAndNeverMutatesHideDbgState() = runTest {
+        var loadCount = 0
+        coEvery { installedAppsSource.load() } coAnswers {
+            loadCount += 1
+            if (loadCount == 1) {
+                Result.success(apps)
+            } else {
+                Result.failure(IllegalStateException("refresh failed"))
+            }
+        }
+        val viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.refreshApps()
+        advanceUntilIdle()
+
+        val state = viewModel.uiState.value
+        assertEquals(2, loadCount)
+        assertEquals(apps, state.apps)
+        assertEquals("refresh failed", state.appLoadError)
+        assertFalse(state.loadingApps)
+        coVerify(exactly = 0) { repo.setHideDbg(any(), any()) }
+        coVerify(exactly = 0) { configStore.save(any()) }
+    }
+
+    @Test
     fun appLoadThrownException_setsRetryableErrorAndClearsLoading() = runTest {
         var loadCount = 0
         coEvery { installedAppsSource.load() } coAnswers {

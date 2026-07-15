@@ -46,6 +46,11 @@ data class HideDbgUiState(
 fun HideDbgUiState.canToggleUid(uid: Int): Boolean =
     !globalEnabled && !globalPending && uid !in pendingUids
 
+fun HideDbgUiState.isAppLoadErrorBlocking(): Boolean =
+    appLoadError != null && apps.isEmpty()
+
+fun InstalledApp.hideDbgToggleLabel(): String = "$label ($packageName)"
+
 class HideDbgViewModel(
     private val repo: YggdrasilRepository,
     private val configStore: HideDbgConfigStore,

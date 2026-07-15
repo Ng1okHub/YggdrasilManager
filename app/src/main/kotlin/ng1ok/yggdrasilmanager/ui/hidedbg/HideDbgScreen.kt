@@ -2,6 +2,7 @@ package ng1ok.yggdrasilmanager.ui.hidedbg
 
 import android.graphics.drawable.Drawable
 import android.widget.ImageView
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -10,7 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -45,6 +46,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
@@ -99,7 +103,10 @@ fun HideDbgScreen(vm: HideDbgViewModel = viewModel(factory = HideDbgViewModel.Fa
 @Composable
 private fun GlobalSetting(state: HideDbgUiState, onToggle: () -> Unit) {
     Row(
-        modifier = Modifier.fillMaxWidth().height(84.dp).padding(horizontal = 16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 84.dp)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -117,6 +124,7 @@ private fun GlobalSetting(state: HideDbgUiState, onToggle: () -> Unit) {
             )
         }
         ToggleSlot(
+            accessibilityLabel = "全局 Hide DBG",
             checked = state.globalEnabled,
             enabled = state.pendingUids.isEmpty(),
             pending = state.globalPending,
@@ -207,40 +215,83 @@ private fun AppsPanel(
             }
         }
 
-        loadError != null -> {
+        state.isAppLoadErrorBlocking() -> {
             LoadFailure(
-                message = loadError,
+                message = requireNotNull(loadError),
                 onRetry = onRetry,
                 modifier = modifier
             )
         }
 
-        visibleApps.isEmpty() -> {
-            EmptyApps(
-                hasInstalledApps = state.apps.isNotEmpty(),
-                modifier = modifier
-            )
-        }
-
         else -> {
-            LazyColumn(
-                modifier = modifier.fillMaxWidth(),
-                contentPadding = PaddingValues(bottom = 16.dp)
-            ) {
-                items(visibleApps, key = InstalledApp::packageName) { app ->
-                    Column {
-                        AppRow(
-                            app = app,
-                            sharedUid = app.uid in sharedUids,
-                            checked = app.uid in state.enabledUids,
-                            enabled = state.canToggleUid(app.uid),
-                            pending = app.uid in state.pendingUids,
-                            onToggle = { onToggleUid(app.uid) }
-                        )
-                        HorizontalDivider(modifier = Modifier.padding(start = 72.dp))
+            Column(modifier = modifier.fillMaxWidth()) {
+                loadError?.let { message ->
+                    InlineLoadFailure(message = message, onRetry = onRetry)
+                }
+
+                if (visibleApps.isEmpty()) {
+                    EmptyApps(
+                        hasInstalledApps = state.apps.isNotEmpty(),
+                        modifier = Modifier.weight(1f)
+                    )
+                } else {
+                    LazyColumn(
+                        modifier = Modifier.weight(1f).fillMaxWidth(),
+                        contentPadding = PaddingValues(bottom = 16.dp)
+                    ) {
+                        items(visibleApps, key = InstalledApp::packageName) { app ->
+                            Column {
+                                AppRow(
+                                    app = app,
+                                    sharedUid = app.uid in sharedUids,
+                                    checked = app.uid in state.enabledUids,
+                                    enabled = state.canToggleUid(app.uid),
+                                    pending = app.uid in state.pendingUids,
+                                    onToggle = { onToggleUid(app.uid) }
+                                )
+                                HorizontalDivider(modifier = Modifier.padding(start = 72.dp))
+                            }
+                        }
                     }
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun InlineLoadFailure(message: String, onRetry: () -> Unit) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(MaterialTheme.colorScheme.errorContainer)
+            .padding(start = 16.dp, end = 8.dp, top = 4.dp, bottom = 4.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(
+            imageVector = Icons.Default.ErrorOutline,
+            contentDescription = null,
+            tint = MaterialTheme.colorScheme.onErrorContainer,
+            modifier = Modifier.size(20.dp)
+        )
+        Text(
+            text = message,
+            modifier = Modifier.weight(1f),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onErrorContainer,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis
+        )
+        IconButton(
+            onClick = onRetry,
+            modifier = Modifier.size(40.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.Refresh,
+                contentDescription = "重試載入 App",
+                tint = MaterialTheme.colorScheme.onErrorContainer
+            )
         }
     }
 }
@@ -309,7 +360,10 @@ private fun AppRow(
     onToggle: () -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().height(76.dp).padding(horizontal = 16.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .heightIn(min = 76.dp)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -347,6 +401,7 @@ private fun AppRow(
             }
         }
         ToggleSlot(
+            accessibilityLabel = app.hideDbgToggleLabel(),
             checked = checked,
             enabled = enabled,
             pending = pending,
@@ -395,6 +450,7 @@ private fun AppIcon(packageName: String) {
 
 @Composable
 private fun ToggleSlot(
+    accessibilityLabel: String,
     checked: Boolean,
     enabled: Boolean,
     pending: Boolean,
@@ -406,14 +462,20 @@ private fun ToggleSlot(
     ) {
         if (pending) {
             CircularProgressIndicator(
-                modifier = Modifier.size(24.dp),
+                modifier = Modifier.size(24.dp).semantics {
+                    contentDescription = accessibilityLabel
+                    stateDescription = "處理中"
+                },
                 strokeWidth = 2.dp
             )
         } else {
             Switch(
                 checked = checked,
                 onCheckedChange = { onToggle() },
-                enabled = enabled
+                enabled = enabled,
+                modifier = Modifier.semantics {
+                    contentDescription = accessibilityLabel
+                }
             )
         }
     }
