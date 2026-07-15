@@ -2,6 +2,8 @@ package ng1ok.yggdrasilmanager.data.hidedbg
 
 import android.content.SharedPreferences
 import java.io.IOException
+import java.util.Collections
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.sync.Mutex
@@ -30,7 +32,7 @@ class SharedPreferencesHideDbgConfigStore(
 
     override suspend fun save(config: HideDbgConfig): Result<Unit> = withContext(ioDispatcher) {
         saveMutex.withLock {
-            val stableConfig = config.copy(enabledUids = config.enabledUids.toSet())
+            val stableConfig = snapshotConfig(config.globalEnabled, config.enabledUids)
             currentValue = stableConfig
 
             try {
@@ -48,7 +50,9 @@ class SharedPreferencesHideDbgConfigStore(
                 } else {
                     Result.failure(IOException("Hide DBG configuration commit failed"))
                 }
-            } catch (failure: Throwable) {
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
                 Result.failure(failure)
             }
         }
@@ -58,25 +62,37 @@ class SharedPreferencesHideDbgConfigStore(
         val schemaVersion = preferences.getInt(KEY_SCHEMA_VERSION, SCHEMA_VERSION)
         if (schemaVersion != SCHEMA_VERSION) {
             LoadedConfig(
-                config = HideDbgConfig(),
+                config = snapshotConfig(),
                 warning = "不支援的 Hide DBG 配置版本：$schemaVersion"
             )
         } else {
             LoadedConfig(
-                config = HideDbgConfig(
+                config = snapshotConfig(
                     globalEnabled = preferences.getBoolean(KEY_GLOBAL_ENABLED, false),
                     enabledUids = preferences.getStringSet(KEY_ENABLED_UIDS, emptySet())
                         .orEmpty()
-                        .mapNotNullTo(mutableSetOf()) { it.toValidUidOrNull() }
-                        .toSet()
+                        .mapNotNull { it.toValidUidOrNull() }
                 )
             )
         }
     } catch (_: RuntimeException) {
         LoadedConfig(
-            config = HideDbgConfig(),
+            config = snapshotConfig(),
             warning = "Hide DBG 配置無法讀取，已使用預設值"
         )
+    }
+
+    private fun snapshotConfig(
+        globalEnabled: Boolean = false,
+        enabledUids: Iterable<Int> = emptySet()
+    ): HideDbgConfig = HideDbgConfig(
+        globalEnabled = globalEnabled,
+        enabledUids = snapshotUids(enabledUids)
+    )
+
+    private fun snapshotUids(enabledUids: Iterable<Int>): Set<Int> {
+        val snapshot = enabledUids.filterTo(LinkedHashSet()) { it >= 0 }
+        return Collections.unmodifiableSet(snapshot)
     }
 
     private fun String.toValidUidOrNull(): Int? {
