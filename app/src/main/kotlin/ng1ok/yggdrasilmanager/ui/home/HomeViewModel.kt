@@ -8,27 +8,73 @@ import androidx.lifecycle.viewmodel.viewModelFactory
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
 
-data class HomeUiState(
-    val rootGranted: Boolean = false,
-    val moduleAvailable: Boolean = false,
-    val loading: Boolean = false
-)
-
 class HomeViewModel(
-    private val repo: YggdrasilRepository = YggdrasilRepository.instance
+    private val repo: YggdrasilRepository = YggdrasilRepository.instance,
+    private val rootStatusSource: RootStatusSource = LibsuRootStatusSource,
+    deviceInfoProvider: DeviceInfoProvider = AndroidDeviceInfoProvider
 ) : ViewModel() {
-    private val _uiState = MutableStateFlow(HomeUiState())
+    private val _uiState = MutableStateFlow(
+        HomeUiState(deviceInfo = deviceInfoProvider.getDeviceInfo())
+    )
     val uiState: StateFlow<HomeUiState> = _uiState.asStateFlow()
 
-    fun refresh(rootGranted: Boolean) {
+    private var startupChecksStarted = false
+
+    fun startStartupChecks() {
+        startStartupChecks(precheckedRootGranted = null)
+    }
+
+    private fun startStartupChecks(precheckedRootGranted: Boolean?) {
+        if (startupChecksStarted) return
+        startupChecksStarted = true
+
         viewModelScope.launch {
-            _uiState.value = _uiState.value.copy(loading = true)
-            val available = if (rootGranted) repo.checkAvailable() else false
-            _uiState.value = HomeUiState(rootGranted = rootGranted, moduleAvailable = available)
+            launch {
+                val rootGranted = precheckedRootGranted ?: runCatching {
+                    rootStatusSource.isRootGranted()
+                }.getOrDefault(false)
+
+                _uiState.update { state ->
+                    when {
+                        rootGranted -> state.copy(rootStatus = RootStatus.GRANTED)
+                        state.hasShownRootDeniedPrompt -> state.copy(rootStatus = RootStatus.DENIED)
+                        else -> state.copy(
+                            rootStatus = RootStatus.DENIED,
+                            showRootDeniedDialog = true,
+                            hasShownRootDeniedPrompt = true
+                        )
+                    }
+                }
+            }
+
+            launch {
+                val available = runCatching {
+                    repo.checkAvailable()
+                }.getOrDefault(false)
+
+                _uiState.update { state ->
+                    state.copy(
+                        yggdrasilStatus = if (available) {
+                            YggdrasilStatus.AVAILABLE
+                        } else {
+                            YggdrasilStatus.UNAVAILABLE
+                        }
+                    )
+                }
+            }
         }
+    }
+
+    fun refresh(rootGranted: Boolean) {
+        startStartupChecks(precheckedRootGranted = rootGranted)
+    }
+
+    fun dismissRootDeniedDialog() {
+        _uiState.update { state -> state.copy(showRootDeniedDialog = false) }
     }
 
     companion object {
