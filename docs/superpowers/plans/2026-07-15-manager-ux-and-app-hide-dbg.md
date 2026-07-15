@@ -1485,7 +1485,7 @@ git add app/src/main/kotlin/ng1ok/yggdrasilmanager/App.kt app/src/main/kotlin/ng
 git commit -m "feat: add cached Hide DBG configuration"
 ```
 
-Expected: tests/build exit 0. Startup constructs the coordinator from cached state without calling `setHideDbg()`, so no KPM state is replayed.
+Expected: tests/build exit 0. At this intermediate step, `App` only loads the cached snapshot and performs no KPM call. The final process-scoped coordinator wiring is added in Task 7; its construction also performs no KPM call.
 
 ### Task 6: Enumerate, Sort, Search, and Group Installed Apps
 
@@ -1763,7 +1763,192 @@ git commit -m "feat: enumerate apps for Hide DBG"
 
 Expected: tests/build exit 0. No Root or KPM API is used for enumeration.
 
-### Task 7: Replace Hide DBG State with UID-Based App Controls
+### Task 7: Move Hide DBG Mutations to Process Scope (Normative Final)
+
+> **Normative lifecycle amendment:** This is the sole current implementation and review contract for Hide DBG mutation ownership. It supersedes every instruction and snippet in the historical Task 7H below.
+
+**Files:**
+
+- Create: `app/src/main/kotlin/ng1ok/yggdrasilmanager/data/hidedbg/HideDbgMutationCoordinator.kt`
+- Modify: `app/src/main/kotlin/ng1ok/yggdrasilmanager/App.kt`
+- Modify: `app/src/main/kotlin/ng1ok/yggdrasilmanager/ui/hidedbg/HideDbgViewModel.kt`
+- Modify: `app/src/test/kotlin/ng1ok/yggdrasilmanager/HideDbgViewModelTest.kt`
+
+**Required ownership and ordering:**
+
+- `App` synchronously constructs `SharedPreferencesHideDbgConfigStore`, then constructs exactly one `HideDbgMutationCoordinator` for the process.
+- The coordinator initializes shared immutable state only from `configStore.current` and `configStore.loadWarning`. Construction and startup must make zero KPM calls.
+- The shared state contains `globalEnabled`, `enabledUids`, `globalPending`, `pendingUids`, and `message`.
+- The coordinator owns one process-wide coroutine `Mutex` and an injected Application-lifetime `CoroutineScope`.
+- Request reservation is atomic so calls from different ViewModel instances cannot pass stale pending checks. The KPM -> shared state -> config sequence runs in the Application scope under the single Mutex.
+- A KPM failure leaves enabled state unchanged and skips config save. A save failure retains applied in-memory state and reports exactly `已套用但未保存`. Cancellation and fatal failures propagate after pending cleanup.
+- Global enable preserves saved UIDs. Successful global disable clears and saves all UIDs without replaying them.
+- `HideDbgViewModel` owns only route-local App-list, query, filter, loading, and load-error state. It observes the coordinator state and delegates every UID/global toggle and message dismissal.
+- App-list initialization and refresh remain in `viewModelScope` and perform zero KPM calls and zero config writes.
+
+- [x] **Step 1: Add the failing route-teardown and cross-instance contracts**
+
+The lifecycle regression uses real `ViewModelStoreOwner`, `ViewModelProvider`, and `ViewModelStore.clear()` calls. With initial config `global=true` and UIDs `{1000, 1001}`, the repository marks the native side effect complete and then waits before returning:
+
+```kotlin
+val nativeApplied = CompletableDeferred<Unit>()
+val allowReturn = CompletableDeferred<Unit>()
+coEvery { repo.setHideDbg(false, null) } coAnswers {
+    nativeApplied.complete(Unit)
+    allowReturn.await()
+    Result.success(Unit)
+}
+
+val coordinator = HideDbgMutationCoordinator(repo, configStore, this)
+val factory = viewModelFactory {
+    initializer { HideDbgViewModel(coordinator, installedAppsSource) }
+}
+val firstOwner = TestViewModelStoreOwner()
+val firstVm = ViewModelProvider(firstOwner, factory)[HideDbgViewModel::class.java]
+
+firstVm.toggleGlobal()
+runCurrent()
+nativeApplied.await()
+firstOwner.viewModelStore.clear()
+
+val secondOwner = TestViewModelStoreOwner()
+val secondVm = ViewModelProvider(secondOwner, factory)[HideDbgViewModel::class.java]
+assertTrue(secondVm.uiState.value.globalPending)
+
+allowReturn.complete(Unit)
+advanceUntilIdle()
+assertFalse(secondVm.uiState.value.globalEnabled)
+assertEquals(emptySet<Int>(), secondVm.uiState.value.enabledUids)
+coVerify(exactly = 1) {
+    configStore.save(HideDbgConfig(false, emptySet()))
+}
+```
+
+Add a second test with two ViewModel owners sharing the same coordinator. Block UID 1000, request UID 1001 from the other ViewModel, and verify UID 1001 does not reach KPM until UID 1000 completes. The saves must then occur in cumulative order: `{1000}`, followed by `{1000, 1001}`.
+
+Expected RED against route-owned mutation state: the re-entered ViewModel reports `globalPending=false`, and the second ViewModel can call KPM while the first instance's Mutex is occupied.
+
+- [x] **Step 2: Add the process-scoped mutation coordinator**
+
+The coordinator has this ownership shape; mutation methods atomically reserve pending state before launching the serialized operation:
+
+```kotlin
+data class HideDbgMutationState(
+    val globalEnabled: Boolean = false,
+    val enabledUids: Set<Int> = emptySet(),
+    val globalPending: Boolean = false,
+    val pendingUids: Set<Int> = emptySet(),
+    val message: String? = null,
+)
+
+class HideDbgMutationCoordinator(
+    private val repo: YggdrasilRepository,
+    private val configStore: HideDbgConfigStore,
+    private val applicationScope: CoroutineScope,
+) {
+    private val mutationMutex = Mutex()
+    private val _state = MutableStateFlow(
+        configStore.current.let { config ->
+            HideDbgMutationState(
+                globalEnabled = config.globalEnabled,
+                enabledUids = config.enabledUids.toSet(),
+                message = configStore.loadWarning,
+            )
+        },
+    )
+    val state: StateFlow<HideDbgMutationState> = _state.asStateFlow()
+}
+```
+
+`toggleUid()` and `toggleGlobal()` reserve pending state with `MutableStateFlow.compareAndSet`. Their Application-scope jobs use `mutationMutex.withLock` around the complete KPM -> shared state -> config transaction and clear pending state in `finally`.
+
+- [x] **Step 3: Construct one coordinator after synchronous config loading**
+
+The relevant final `App` dependency wiring is:
+
+```kotlin
+class App : Application() {
+    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+
+    lateinit var hideDbgConfigStore: HideDbgConfigStore
+        private set
+    lateinit var hideDbgMutationCoordinator: HideDbgMutationCoordinator
+        private set
+    lateinit var installedAppsSource: InstalledAppsSource
+        private set
+
+    override fun onCreate() {
+        super.onCreate()
+        hideDbgConfigStore = SharedPreferencesHideDbgConfigStore(
+            getSharedPreferences(
+                SharedPreferencesHideDbgConfigStore.FILE_NAME,
+                Context.MODE_PRIVATE,
+            ),
+        )
+        hideDbgMutationCoordinator = HideDbgMutationCoordinator(
+            repo = YggdrasilRepository.instance,
+            configStore = hideDbgConfigStore,
+            applicationScope = applicationScope,
+        )
+        installedAppsSource = PackageManagerInstalledAppsSource(packageManager)
+    }
+}
+```
+
+Creating the repository and coordinator does not call `setHideDbg()`. Only an explicit user toggle reaches the coordinator mutation methods.
+
+- [x] **Step 4: Combine shared mutation state with route-local presentation state**
+
+The final ViewModel constructor and factory do not receive the repository or config store:
+
+```kotlin
+class HideDbgViewModel(
+    private val mutationCoordinator: HideDbgMutationCoordinator,
+    private val installedAppsSource: InstalledAppsSource,
+) : ViewModel() {
+    private val localState = MutableStateFlow(HideDbgLocalState())
+    val uiState: StateFlow<HideDbgUiState> = combine(
+        mutationCoordinator.state,
+        localState,
+    ) { mutationState, routeState ->
+        routeState.toUiState(mutationState)
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.Eagerly,
+        initialValue = localState.value.toUiState(mutationCoordinator.state.value),
+    )
+
+    fun toggleUid(uid: Int) = mutationCoordinator.toggleUid(uid)
+    fun toggleGlobal() = mutationCoordinator.toggleGlobal()
+    fun dismissMessage() = mutationCoordinator.dismissMessage()
+
+    companion object {
+        val Factory: ViewModelProvider.Factory = viewModelFactory {
+            initializer {
+                val app = this[APPLICATION_KEY] as App
+                HideDbgViewModel(
+                    mutationCoordinator = app.hideDbgMutationCoordinator,
+                    installedAppsSource = app.installedAppsSource,
+                )
+            }
+        }
+    }
+}
+```
+
+- [x] **Step 5: Verify lifecycle GREEN and the complete JVM suite**
+
+```powershell
+.\gradlew.bat :app:testDebugUnitTest --tests "ng1ok.yggdrasilmanager.HideDbgViewModelTest.toggleGlobal_routeTeardownAfterNativeApplyFinishesThroughSharedState"
+.\gradlew.bat :app:testDebugUnitTest --tests "ng1ok.yggdrasilmanager.HideDbgViewModelTest.toggleUid_distinctRequestsAcrossViewModelsSerializeAndSaveCumulativeSnapshots"
+.\gradlew.bat :app:testDebugUnitTest
+```
+
+Expected: both lifecycle regressions and the complete suite exit 0. A re-entered ViewModel observes the existing pending/result state; different ViewModel instances serialize through the same Mutex; startup and App-list refresh still issue zero Hide DBG KPM writes.
+
+### Task 7H (Superseded, Non-Normative): Initial Route-Scoped State Machine
+
+> **Do not implement or review this section as current architecture.** It is retained only as the historical first TDD iteration. Every file list, checkbox, constructor, wiring snippet, command, and Expected paragraph from here through the explicit end marker immediately before Task 8 is non-normative. In particular, `HideDbgViewModel(repo, store, source)`, direct repository/config-store ownership, `operationMutex`, and mutation launches in `viewModelScope` are obsolete; Task 7 immediately above is the final contract.
 
 **Files:**
 
@@ -2205,6 +2390,8 @@ git commit -m "feat: manage Hide DBG app state by UID"
 ```
 
 Expected: focused test exits 0, including the assertion that initialization sends zero KPM writes.
+
+> **End of superseded Task 7H.** Normative implementation instructions resume with Task 8.
 
 ### Task 8: Render the Searchable Hide DBG App List
 
