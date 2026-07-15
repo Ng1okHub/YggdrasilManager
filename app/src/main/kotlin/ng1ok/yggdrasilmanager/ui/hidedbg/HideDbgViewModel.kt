@@ -8,11 +8,8 @@ import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -46,6 +43,9 @@ data class HideDbgUiState(
         get() = findSharedUids(apps)
 }
 
+fun HideDbgUiState.canToggleUid(uid: Int): Boolean =
+    !globalEnabled && !globalPending && uid !in pendingUids
+
 class HideDbgViewModel(
     private val repo: YggdrasilRepository,
     private val configStore: HideDbgConfigStore,
@@ -62,30 +62,6 @@ class HideDbgViewModel(
         }
     )
     val uiState: StateFlow<HideDbgUiState> = _uiState.asStateFlow()
-
-    val globalEnabled: StateFlow<Boolean> = uiState
-        .map { state -> state.globalEnabled }
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.Eagerly,
-            initialValue = _uiState.value.globalEnabled
-        )
-
-    val uidRules: StateFlow<List<Int>> = uiState
-        .map { state -> state.enabledUids.sorted() }
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.Eagerly,
-            initialValue = _uiState.value.enabledUids.sorted()
-        )
-
-    val error: StateFlow<String?> = uiState
-        .map { state -> state.message }
-        .stateIn(
-            scope = viewModelScope,
-            started = SharingStarted.Eagerly,
-            initialValue = _uiState.value.message
-        )
 
     init {
         refreshApps()
@@ -134,7 +110,7 @@ class HideDbgViewModel(
 
     fun toggleUid(uid: Int) {
         val state = _uiState.value
-        if (state.globalEnabled || state.globalPending || uid in state.pendingUids) return
+        if (!state.canToggleUid(uid)) return
 
         val enable = uid !in state.enabledUids
         _uiState.update { current ->
@@ -229,22 +205,6 @@ class HideDbgViewModel(
 
     fun dismissMessage() {
         _uiState.update { state -> state.copy(message = null) }
-    }
-
-    fun addUid(uid: Int) {
-        if (uid !in _uiState.value.enabledUids) {
-            toggleUid(uid)
-        }
-    }
-
-    fun removeUid(uid: Int) {
-        if (uid in _uiState.value.enabledUids) {
-            toggleUid(uid)
-        }
-    }
-
-    fun dismissError() {
-        dismissMessage()
     }
 
     private suspend fun loadInstalledApps(): Result<List<InstalledApp>> {
