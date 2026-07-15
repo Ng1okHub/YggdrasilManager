@@ -12,10 +12,14 @@ import ng1ok.yggdrasilmanager.ui.hwbp.HwbpScreen
 
 @Composable
 fun NavGraph(navController: NavHostController, modifier: Modifier = Modifier) {
-    NavHost(navController = navController, startDestination = BottomNavItem.Home.route, modifier = modifier) {
-        composable(BottomNavItem.Home.route) { HomeScreen() }
-        composable(BottomNavItem.Features.route) { FeaturesScreen(navController) }
-        composable("hwbp") { HwbpScreen() }
-        composable("hidedbg") { HideDbgScreen() }
+    NavHost(
+        navController = navController,
+        startDestination = AppDestination.Home.route,
+        modifier = modifier
+    ) {
+        composable(AppDestination.Home.route) { HomeScreen() }
+        composable(AppDestination.Features.route) { FeaturesScreen(navController) }
+        composable(AppDestination.Hwbp.route) { HwbpScreen() }
+        composable(AppDestination.HideDbg.route) { HideDbgScreen() }
     }
 }
