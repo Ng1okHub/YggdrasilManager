@@ -4,7 +4,7 @@
 
 **Goal:** Add an informational Root warning, a device-rich manager home screen, explicit child-screen navigation, and searchable per-App Hide DBG controls backed by a read-only-at-startup configuration snapshot.
 
-**Architecture:** Keep the existing single-activity Compose/MVVM structure. Centralize route chrome, isolate platform reads behind small providers, initialize an app-private Hide DBG configuration store in `Application.onCreate()`, map installed packages to UID-based state, and keep every KPM mutation inside `HideDbgViewModel` after explicit user actions.
+**Architecture:** Keep the existing single-activity Compose/MVVM structure. Centralize route chrome, isolate platform reads behind small providers, initialize an app-private Hide DBG configuration store and process-scoped mutation coordinator in `Application.onCreate()`, map installed packages to UID-based state, and route every explicit KPM mutation through that coordinator so route teardown cannot cancel result handling.
 
 **Tech Stack:** Kotlin, Jetpack Compose Material 3, Navigation Compose, ViewModel/StateFlow, libsu, Android PackageManager/SharedPreferences, kotlinx-coroutines-test, MockK, JUnit 4, Gradle/AGP, JNI/CMake.
 
@@ -39,14 +39,15 @@
 
 - Create `app/src/main/kotlin/ng1ok/yggdrasilmanager/data/hidedbg/HideDbgConfig.kt`: persisted state model and store interface.
 - Create `app/src/main/kotlin/ng1ok/yggdrasilmanager/data/hidedbg/SharedPreferencesHideDbgConfigStore.kt`: schema validation, cached snapshot, and serialized commits.
+- Create `app/src/main/kotlin/ng1ok/yggdrasilmanager/data/hidedbg/HideDbgMutationCoordinator.kt`: process-scoped mutation state, serialization, and KPM-to-config sequencing.
 - Create `app/src/main/kotlin/ng1ok/yggdrasilmanager/data/hidedbg/InstalledApp.kt`: app/filter models and pure list derivations.
 - Create `app/src/main/kotlin/ng1ok/yggdrasilmanager/data/hidedbg/InstalledAppsSource.kt`: PackageManager adapter.
-- Modify `app/src/main/kotlin/ng1ok/yggdrasilmanager/App.kt`: construct/read config and construct app source at process startup.
+- Modify `app/src/main/kotlin/ng1ok/yggdrasilmanager/App.kt`: construct/read config, then construct the mutation coordinator and app source at process startup.
 - Modify `app/src/main/AndroidManifest.xml`: declare all-packages visibility.
 
 **Hide DBG presentation:**
 
-- Replace `app/src/main/kotlin/ng1ok/yggdrasilmanager/ui/hidedbg/HideDbgViewModel.kt`: one immutable UI state and UID/global operations.
+- Replace `app/src/main/kotlin/ng1ok/yggdrasilmanager/ui/hidedbg/HideDbgViewModel.kt`: combine shared mutation state with route-local App-list state and delegate UID/global operations.
 - Replace `app/src/main/kotlin/ng1ok/yggdrasilmanager/ui/hidedbg/HideDbgScreen.kt`: global control, search, segmented filter, and app list.
 
 **Tests:**
@@ -1484,7 +1485,7 @@ git add app/src/main/kotlin/ng1ok/yggdrasilmanager/App.kt app/src/main/kotlin/ng
 git commit -m "feat: add cached Hide DBG configuration"
 ```
 
-Expected: tests/build exit 0. `App.kt` contains no repository/native reference and therefore cannot replay KPM state.
+Expected: tests/build exit 0. Startup constructs the coordinator from cached state without calling `setHideDbg()`, so no KPM state is replayed.
 
 ### Task 6: Enumerate, Sort, Search, and Group Installed Apps
 

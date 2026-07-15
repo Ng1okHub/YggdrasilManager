@@ -1,5 +1,10 @@
 package ng1ok.yggdrasilmanager
 
+import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.ViewModelStore
+import androidx.lifecycle.ViewModelStoreOwner
+import androidx.lifecycle.viewmodel.initializer
+import androidx.lifecycle.viewmodel.viewModelFactory
 import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.coVerifyOrder
@@ -12,6 +17,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
@@ -20,6 +26,7 @@ import kotlinx.coroutines.test.setMain
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
 import ng1ok.yggdrasilmanager.data.hidedbg.HideDbgConfig
 import ng1ok.yggdrasilmanager.data.hidedbg.HideDbgConfigStore
+import ng1ok.yggdrasilmanager.data.hidedbg.HideDbgMutationCoordinator
 import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
 import ng1ok.yggdrasilmanager.data.hidedbg.InstalledAppsSource
 import ng1ok.yggdrasilmanager.ui.hidedbg.HideDbgViewModel
@@ -273,6 +280,112 @@ class HideDbgViewModelTest {
         coVerifyOrder {
             repo.setHideDbg(false, null)
             configStore.save(HideDbgConfig(false, emptySet()))
+        }
+    }
+
+    @Test
+    fun toggleGlobal_routeTeardownAfterNativeApplyFinishesThroughSharedState() = runTest {
+        val initialConfig = HideDbgConfig(
+            globalEnabled = true,
+            enabledUids = setOf(1000, 1001)
+        )
+        every { configStore.current } returns initialConfig
+        every { configStore.loadWarning } returns null
+        val nativeApplied = CompletableDeferred<Unit>()
+        val allowReturn = CompletableDeferred<Unit>()
+        coEvery { repo.setHideDbg(false, null) } coAnswers {
+            nativeApplied.complete(Unit)
+            allowReturn.await()
+            Result.success(Unit)
+        }
+        val mutationCoordinator = HideDbgMutationCoordinator(repo, configStore, this)
+        val factory = viewModelFactory {
+            initializer {
+                HideDbgViewModel(mutationCoordinator, installedAppsSource)
+            }
+        }
+        val firstOwner = TestViewModelStoreOwner()
+        val firstViewModel = ViewModelProvider(firstOwner, factory)[HideDbgViewModel::class.java]
+        advanceUntilIdle()
+
+        firstViewModel.toggleGlobal()
+        runCurrent()
+        nativeApplied.await()
+        firstOwner.viewModelStore.clear()
+
+        val secondOwner = TestViewModelStoreOwner()
+        val secondViewModel = ViewModelProvider(secondOwner, factory)[HideDbgViewModel::class.java]
+        try {
+            assertTrue(secondViewModel.uiState.value.globalPending)
+
+            allowReturn.complete(Unit)
+            advanceUntilIdle()
+
+            assertFalse(secondViewModel.uiState.value.globalEnabled)
+            assertEquals(emptySet<Int>(), secondViewModel.uiState.value.enabledUids)
+            coVerify(exactly = 1) {
+                configStore.save(HideDbgConfig(false, emptySet()))
+            }
+        } finally {
+            allowReturn.complete(Unit)
+            secondOwner.viewModelStore.clear()
+        }
+    }
+
+    @Test
+    fun toggleUid_distinctRequestsAcrossViewModelsSerializeAndSaveCumulativeSnapshots() = runTest {
+        every { configStore.current } returns HideDbgConfig()
+        every { configStore.loadWarning } returns null
+        val allowFirstReturn = CompletableDeferred<Unit>()
+        coEvery { repo.setHideDbg(true, 1000) } coAnswers {
+            allowFirstReturn.await()
+            Result.success(Unit)
+        }
+        val mutationCoordinator = HideDbgMutationCoordinator(repo, configStore, this)
+        val factory = viewModelFactory {
+            initializer {
+                HideDbgViewModel(mutationCoordinator, installedAppsSource)
+            }
+        }
+        val firstOwner = TestViewModelStoreOwner()
+        val secondOwner = TestViewModelStoreOwner()
+        val firstViewModel = ViewModelProvider(firstOwner, factory)[HideDbgViewModel::class.java]
+        val secondViewModel = ViewModelProvider(secondOwner, factory)[HideDbgViewModel::class.java]
+        advanceUntilIdle()
+
+        firstViewModel.toggleUid(1000)
+        runCurrent()
+        coVerify(exactly = 1) { repo.setHideDbg(true, 1000) }
+
+        secondViewModel.toggleUid(1001)
+        runCurrent()
+
+        try {
+            coVerify(exactly = 0) { repo.setHideDbg(true, 1001) }
+            assertEquals(
+                setOf(1000, 1001),
+                secondViewModel.uiState.value.pendingUids
+            )
+        } finally {
+            allowFirstReturn.complete(Unit)
+            advanceUntilIdle()
+            firstOwner.viewModelStore.clear()
+            secondOwner.viewModelStore.clear()
+        }
+
+        assertEquals(
+            setOf(1000, 1001),
+            firstViewModel.uiState.value.enabledUids
+        )
+        assertEquals(
+            setOf(1000, 1001),
+            secondViewModel.uiState.value.enabledUids
+        )
+        coVerifyOrder {
+            repo.setHideDbg(true, 1000)
+            configStore.save(HideDbgConfig(false, setOf(1000)))
+            repo.setHideDbg(true, 1001)
+            configStore.save(HideDbgConfig(false, setOf(1000, 1001)))
         }
     }
 
@@ -595,13 +708,20 @@ class HideDbgViewModelTest {
         }
     }
 
-    private fun createViewModel(
+    private fun TestScope.createViewModel(
         config: HideDbgConfig = HideDbgConfig(),
         loadWarning: String? = null
     ): HideDbgViewModel {
         every { configStore.current } returns config
         every { configStore.loadWarning } returns loadWarning
-        return HideDbgViewModel(repo, configStore, installedAppsSource)
+        return HideDbgViewModel(
+            HideDbgMutationCoordinator(repo, configStore, this),
+            installedAppsSource
+        )
+    }
+
+    private class TestViewModelStoreOwner : ViewModelStoreOwner {
+        override val viewModelStore = ViewModelStore()
     }
 
     private class FatalTestError(message: String) : Error(message)

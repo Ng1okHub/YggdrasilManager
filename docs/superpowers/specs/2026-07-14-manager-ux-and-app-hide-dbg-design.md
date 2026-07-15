@@ -106,9 +106,11 @@ data class HideDbgUiState(
 )
 ```
 
-Hide DBG 畫面建立時直接取得 Application 已載入的配置 snapshot，並與 App 清單載入並行組合成 UI state。任何初始化流程都不得呼叫 `setHideDbg()` 或其他會改變 KPM 狀態的方法。
+Application-scoped mutation coordinator 只從已載入的配置 snapshot 建立共享狀態；Hide DBG 畫面再將該狀態與 route-local App 清單並行組合成 UI state。任何初始化流程都不得呼叫 `setHideDbg()` 或其他會改變 KPM 狀態的方法。
 
 ## 5. Hide DBG 資料流
+
+所有 UID／全局 mutation 由 Application-scoped coordinator 的單一 Mutex 串行執行。畫面離開只取消 App 清單工作，不取消已由使用者觸發的 KPM、狀態與配置更新；重新進入的畫面直接觀察同一份 pending 與結果狀態。
 
 ### 5.1 按 App 切換
 
