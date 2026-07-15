@@ -27,6 +27,8 @@ import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -140,6 +142,92 @@ class HideDbgViewModelTest {
 
         assertEquals("packages", viewModel.uiState.value.appLoadError)
         assertEquals(setOf(1000), viewModel.uiState.value.enabledUids)
+        coVerify(exactly = 0) { repo.setHideDbg(any(), any()) }
+    }
+
+    @Test
+    fun appLoadThrownException_setsRetryableErrorAndClearsLoading() = runTest {
+        var loadCount = 0
+        coEvery { installedAppsSource.load() } coAnswers {
+            loadCount += 1
+            if (loadCount == 1) {
+                throw IllegalStateException("packages")
+            }
+            Result.success(apps)
+        }
+        val viewModel = createViewModel(
+            HideDbgConfig(enabledUids = setOf(1000))
+        )
+
+        advanceUntilIdle()
+
+        assertFalse(viewModel.uiState.value.loadingApps)
+        assertEquals("packages", viewModel.uiState.value.appLoadError)
+        assertEquals(setOf(1000), viewModel.uiState.value.enabledUids)
+
+        viewModel.refreshApps()
+        advanceUntilIdle()
+
+        assertEquals(2, loadCount)
+        assertEquals(apps, viewModel.uiState.value.apps)
+        assertNull(viewModel.uiState.value.appLoadError)
+        coVerify(exactly = 0) { repo.setHideDbg(any(), any()) }
+    }
+
+    @Test
+    fun appLoadResultCancellation_clearsLoadingAndPropagates() = runTest {
+        var operationJob: Job? = null
+        coEvery { installedAppsSource.load() } coAnswers {
+            operationJob = currentCoroutineContext()[Job]
+            Result.failure(CancellationException("cancelled"))
+        }
+        val viewModel = createViewModel()
+
+        advanceUntilIdle()
+
+        assertTrue(operationJob?.isCancelled == true)
+        assertFalse(viewModel.uiState.value.loadingApps)
+        assertNull(viewModel.uiState.value.appLoadError)
+        coVerify(exactly = 0) { repo.setHideDbg(any(), any()) }
+    }
+
+    @Test
+    fun appLoadResultFatal_clearsLoadingAndPropagates() {
+        lateinit var viewModel: HideDbgViewModel
+        val fatal = FatalTestError("fatal app result")
+
+        val thrown = assertThrows(FatalTestError::class.java) {
+            runTest {
+                coEvery { installedAppsSource.load() } returns Result.failure(fatal)
+                viewModel = createViewModel()
+
+                advanceUntilIdle()
+            }
+        }
+
+        assertSame(fatal, thrown)
+        assertFalse(viewModel.uiState.value.loadingApps)
+        assertNull(viewModel.uiState.value.appLoadError)
+        coVerify(exactly = 0) { repo.setHideDbg(any(), any()) }
+    }
+
+    @Test
+    fun appLoadThrownFatal_clearsLoadingAndPropagates() {
+        lateinit var viewModel: HideDbgViewModel
+        val fatal = FatalTestError("fatal app throw")
+
+        val thrown = assertThrows(FatalTestError::class.java) {
+            runTest {
+                coEvery { installedAppsSource.load() } throws fatal
+                viewModel = createViewModel()
+
+                advanceUntilIdle()
+            }
+        }
+
+        assertSame(fatal, thrown)
+        assertFalse(viewModel.uiState.value.loadingApps)
+        assertNull(viewModel.uiState.value.appLoadError)
         coVerify(exactly = 0) { repo.setHideDbg(any(), any()) }
     }
 
@@ -286,6 +374,110 @@ class HideDbgViewModelTest {
         coVerify(exactly = 0) { configStore.save(any()) }
     }
 
+    @Test
+    fun toggleUid_resultCancellationClearsPendingAndPropagatesWithoutSaving() = runTest {
+        var operationJob: Job? = null
+        coEvery { repo.setHideDbg(true, 1000) } coAnswers {
+            operationJob = currentCoroutineContext()[Job]
+            Result.failure(CancellationException("cancelled result"))
+        }
+        val viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.toggleUid(1000)
+        advanceUntilIdle()
+
+        assertTrue(operationJob?.isCancelled == true)
+        assertEquals(emptySet<Int>(), viewModel.uiState.value.pendingUids)
+        assertEquals(emptySet<Int>(), viewModel.uiState.value.enabledUids)
+        assertNull(viewModel.uiState.value.message)
+        coVerify(exactly = 0) { configStore.save(any()) }
+    }
+
+    @Test
+    fun toggleGlobal_resultFatalClearsPendingAndPropagatesWithoutSaving() {
+        lateinit var viewModel: HideDbgViewModel
+        val fatal = FatalTestError("fatal global KPM result")
+        val initialConfig = HideDbgConfig(
+            globalEnabled = true,
+            enabledUids = setOf(1000, 1001)
+        )
+
+        val thrown = assertThrows(FatalTestError::class.java) {
+            runTest {
+                coEvery { repo.setHideDbg(false, null) } returns Result.failure(fatal)
+                viewModel = createViewModel(initialConfig)
+                advanceUntilIdle()
+
+                viewModel.toggleGlobal()
+                advanceUntilIdle()
+            }
+        }
+
+        assertSame(fatal, thrown)
+        assertFalse(viewModel.uiState.value.globalPending)
+        assertTrue(viewModel.uiState.value.globalEnabled)
+        assertEquals(initialConfig.enabledUids, viewModel.uiState.value.enabledUids)
+        assertNull(viewModel.uiState.value.message)
+        coVerify(exactly = 0) { configStore.save(any()) }
+    }
+
+    @Test
+    fun toggleUid_saveResultCancellationRetainsAppliedStateAndPropagates() = runTest {
+        var operationJob: Job? = null
+        coEvery { configStore.save(HideDbgConfig(false, setOf(1000))) } coAnswers {
+            operationJob = currentCoroutineContext()[Job]
+            Result.failure(CancellationException("cancelled save result"))
+        }
+        val viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.toggleUid(1000)
+        advanceUntilIdle()
+
+        assertTrue(operationJob?.isCancelled == true)
+        assertEquals(emptySet<Int>(), viewModel.uiState.value.pendingUids)
+        assertEquals(setOf(1000), viewModel.uiState.value.enabledUids)
+        assertNull(viewModel.uiState.value.message)
+        coVerifyOrder {
+            repo.setHideDbg(true, 1000)
+            configStore.save(HideDbgConfig(false, setOf(1000)))
+        }
+    }
+
+    @Test
+    fun toggleGlobal_saveResultFatalRetainsAppliedStateAndPropagates() {
+        lateinit var viewModel: HideDbgViewModel
+        val fatal = FatalTestError("fatal global save result")
+        val initialConfig = HideDbgConfig(
+            globalEnabled = true,
+            enabledUids = setOf(1000, 1001)
+        )
+
+        val thrown = assertThrows(FatalTestError::class.java) {
+            runTest {
+                coEvery {
+                    configStore.save(HideDbgConfig(false, emptySet()))
+                } returns Result.failure(fatal)
+                viewModel = createViewModel(initialConfig)
+                advanceUntilIdle()
+
+                viewModel.toggleGlobal()
+                advanceUntilIdle()
+            }
+        }
+
+        assertSame(fatal, thrown)
+        assertFalse(viewModel.uiState.value.globalPending)
+        assertFalse(viewModel.uiState.value.globalEnabled)
+        assertEquals(emptySet<Int>(), viewModel.uiState.value.enabledUids)
+        assertNull(viewModel.uiState.value.message)
+        coVerifyOrder {
+            repo.setHideDbg(false, null)
+            configStore.save(HideDbgConfig(false, emptySet()))
+        }
+    }
+
     private fun createViewModel(
         config: HideDbgConfig = HideDbgConfig(),
         loadWarning: String? = null
@@ -294,4 +486,6 @@ class HideDbgViewModelTest {
         every { configStore.loadWarning } returns loadWarning
         return HideDbgViewModel(repo, configStore, installedAppsSource)
     }
+
+    private class FatalTestError(message: String) : Error(message)
 }

@@ -98,32 +98,29 @@ class HideDbgViewModel(
             state.copy(loadingApps = true, appLoadError = null)
         }
         viewModelScope.launch {
-            val result = try {
-                installedAppsSource.load()
-            } catch (cancellation: CancellationException) {
+            try {
+                loadInstalledApps().fold(
+                    onSuccess = { apps ->
+                        _uiState.update { state ->
+                            state.copy(
+                                apps = apps.toList(),
+                                loadingApps = false,
+                                appLoadError = null
+                            )
+                        }
+                    },
+                    onFailure = { failure ->
+                        _uiState.update { state ->
+                            state.copy(
+                                loadingApps = false,
+                                appLoadError = failure.message ?: APP_LOAD_ERROR
+                            )
+                        }
+                    }
+                )
+            } finally {
                 _uiState.update { state -> state.copy(loadingApps = false) }
-                throw cancellation
             }
-
-            result.fold(
-                onSuccess = { apps ->
-                    _uiState.update { state ->
-                        state.copy(
-                            apps = apps.toList(),
-                            loadingApps = false,
-                            appLoadError = null
-                        )
-                    }
-                },
-                onFailure = { failure ->
-                    _uiState.update { state ->
-                        state.copy(
-                            loadingApps = false,
-                            appLoadError = failure.message ?: APP_LOAD_ERROR
-                        )
-                    }
-                }
-            )
         }
     }
 
@@ -250,20 +247,44 @@ class HideDbgViewModel(
         dismissMessage()
     }
 
-    private suspend fun invokeKpm(enable: Boolean, uid: Int?): Result<Unit> = try {
-        repo.setHideDbg(enable, uid)
-    } catch (cancellation: CancellationException) {
-        throw cancellation
-    } catch (failure: Exception) {
-        Result.failure(failure)
+    private suspend fun loadInstalledApps(): Result<List<InstalledApp>> {
+        val result = try {
+            installedAppsSource.load()
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            Result.failure(failure)
+        }
+        return result.propagateCancellationAndFatal()
     }
 
-    private suspend fun saveConfig(config: HideDbgConfig): Result<Unit> = try {
-        configStore.save(config)
-    } catch (cancellation: CancellationException) {
-        throw cancellation
-    } catch (failure: Exception) {
-        Result.failure(failure)
+    private suspend fun invokeKpm(enable: Boolean, uid: Int?): Result<Unit> {
+        val result = try {
+            repo.setHideDbg(enable, uid)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            Result.failure(failure)
+        }
+        return result.propagateCancellationAndFatal()
+    }
+
+    private suspend fun saveConfig(config: HideDbgConfig): Result<Unit> {
+        val result = try {
+            configStore.save(config)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            Result.failure(failure)
+        }
+        return result.propagateCancellationAndFatal()
+    }
+
+    private fun <T> Result<T>.propagateCancellationAndFatal(): Result<T> = apply {
+        when (val failure = exceptionOrNull()) {
+            is CancellationException -> throw failure
+            is Error -> throw failure
+        }
     }
 
     companion object {
