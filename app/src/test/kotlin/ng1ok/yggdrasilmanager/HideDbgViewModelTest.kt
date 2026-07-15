@@ -305,17 +305,19 @@ class HideDbgViewModelTest {
             }
         }
         val firstOwner = TestViewModelStoreOwner()
-        val firstViewModel = ViewModelProvider(firstOwner, factory)[HideDbgViewModel::class.java]
-        advanceUntilIdle()
-
-        firstViewModel.toggleGlobal()
-        runCurrent()
-        nativeApplied.await()
-        firstOwner.viewModelStore.clear()
-
         val secondOwner = TestViewModelStoreOwner()
-        val secondViewModel = ViewModelProvider(secondOwner, factory)[HideDbgViewModel::class.java]
         try {
+            val firstViewModel =
+                ViewModelProvider(firstOwner, factory)[HideDbgViewModel::class.java]
+            advanceUntilIdle()
+
+            firstViewModel.toggleGlobal()
+            runCurrent()
+            nativeApplied.await()
+            firstOwner.viewModelStore.clear()
+
+            val secondViewModel =
+                ViewModelProvider(secondOwner, factory)[HideDbgViewModel::class.java]
             assertTrue(secondViewModel.uiState.value.globalPending)
 
             allowReturn.complete(Unit)
@@ -323,11 +325,13 @@ class HideDbgViewModelTest {
 
             assertFalse(secondViewModel.uiState.value.globalEnabled)
             assertEquals(emptySet<Int>(), secondViewModel.uiState.value.enabledUids)
+            assertFalse(secondViewModel.uiState.value.globalPending)
             coVerify(exactly = 1) {
                 configStore.save(HideDbgConfig(false, emptySet()))
             }
         } finally {
             allowReturn.complete(Unit)
+            firstOwner.viewModelStore.clear()
             secondOwner.viewModelStore.clear()
         }
     }
@@ -336,8 +340,10 @@ class HideDbgViewModelTest {
     fun toggleUid_distinctRequestsAcrossViewModelsSerializeAndSaveCumulativeSnapshots() = runTest {
         every { configStore.current } returns HideDbgConfig()
         every { configStore.loadWarning } returns null
+        val firstKpmStarted = CompletableDeferred<Unit>()
         val allowFirstReturn = CompletableDeferred<Unit>()
         coEvery { repo.setHideDbg(true, 1000) } coAnswers {
+            firstKpmStarted.complete(Unit)
             allowFirstReturn.await()
             Result.success(Unit)
         }
@@ -349,43 +355,51 @@ class HideDbgViewModelTest {
         }
         val firstOwner = TestViewModelStoreOwner()
         val secondOwner = TestViewModelStoreOwner()
-        val firstViewModel = ViewModelProvider(firstOwner, factory)[HideDbgViewModel::class.java]
-        val secondViewModel = ViewModelProvider(secondOwner, factory)[HideDbgViewModel::class.java]
-        advanceUntilIdle()
-
-        firstViewModel.toggleUid(1000)
-        runCurrent()
-        coVerify(exactly = 1) { repo.setHideDbg(true, 1000) }
-
-        secondViewModel.toggleUid(1001)
-        runCurrent()
-
         try {
+            val firstViewModel =
+                ViewModelProvider(firstOwner, factory)[HideDbgViewModel::class.java]
+            val secondViewModel =
+                ViewModelProvider(secondOwner, factory)[HideDbgViewModel::class.java]
+            advanceUntilIdle()
+
+            firstViewModel.toggleUid(1000)
+            runCurrent()
+            assertTrue(firstKpmStarted.isCompleted)
+
+            secondViewModel.toggleUid(1001)
+            runCurrent()
+
             coVerify(exactly = 0) { repo.setHideDbg(true, 1001) }
             assertEquals(
                 setOf(1000, 1001),
                 secondViewModel.uiState.value.pendingUids
             )
-        } finally {
+
             allowFirstReturn.complete(Unit)
             advanceUntilIdle()
+
+            assertEquals(
+                setOf(1000, 1001),
+                firstViewModel.uiState.value.enabledUids
+            )
+            assertEquals(
+                setOf(1000, 1001),
+                secondViewModel.uiState.value.enabledUids
+            )
+            assertEquals(emptySet<Int>(), firstViewModel.uiState.value.pendingUids)
+            assertEquals(emptySet<Int>(), secondViewModel.uiState.value.pendingUids)
+            coVerify(exactly = 1) { repo.setHideDbg(true, 1000) }
+            coVerify(exactly = 1) { repo.setHideDbg(true, 1001) }
+            coVerifyOrder {
+                repo.setHideDbg(true, 1000)
+                configStore.save(HideDbgConfig(false, setOf(1000)))
+                repo.setHideDbg(true, 1001)
+                configStore.save(HideDbgConfig(false, setOf(1000, 1001)))
+            }
+        } finally {
+            allowFirstReturn.complete(Unit)
             firstOwner.viewModelStore.clear()
             secondOwner.viewModelStore.clear()
-        }
-
-        assertEquals(
-            setOf(1000, 1001),
-            firstViewModel.uiState.value.enabledUids
-        )
-        assertEquals(
-            setOf(1000, 1001),
-            secondViewModel.uiState.value.enabledUids
-        )
-        coVerifyOrder {
-            repo.setHideDbg(true, 1000)
-            configStore.save(HideDbgConfig(false, setOf(1000)))
-            repo.setHideDbg(true, 1001)
-            configStore.save(HideDbgConfig(false, setOf(1000, 1001)))
         }
     }
 
