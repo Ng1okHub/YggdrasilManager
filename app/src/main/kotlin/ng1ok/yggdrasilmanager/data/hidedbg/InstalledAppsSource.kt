@@ -3,6 +3,7 @@ package ng1ok.yggdrasilmanager.data.hidedbg
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageManager
 import android.os.Build
+import java.text.Collator
 import java.util.Locale
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
@@ -29,14 +30,20 @@ class PackageManagerInstalledAppsSource internal constructor(
 ) : InstalledAppsSource {
     override suspend fun load(): Result<List<InstalledApp>> = withContext(ioDispatcher) {
         try {
+            val labelCollator = Collator.getInstance(Locale.getDefault())
+            val appComparator = Comparator<InstalledApp> { first, second ->
+                val labelComparison = labelCollator.compare(first.label, second.label)
+                if (labelComparison != 0) {
+                    labelComparison
+                } else {
+                    first.packageName.compareTo(second.packageName)
+                }
+            }
+
             Result.success(
                 queryRecords()
                     .map(PackageRecord::toInstalledApp)
-                    .sortedWith(
-                        compareBy<InstalledApp> {
-                            it.label.lowercase(Locale.getDefault())
-                        }.thenBy(InstalledApp::packageName)
-                    )
+                    .sortedWith(appComparator)
             )
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -48,7 +55,7 @@ class PackageManagerInstalledAppsSource internal constructor(
 
 private fun PackageRecord.toInstalledApp(): InstalledApp = InstalledApp(
     packageName = packageName,
-    label = label,
+    label = label.takeUnless(String::isBlank) ?: packageName,
     uid = uid,
     isSystem = flags and ApplicationInfo.FLAG_SYSTEM != 0 ||
         flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP != 0
