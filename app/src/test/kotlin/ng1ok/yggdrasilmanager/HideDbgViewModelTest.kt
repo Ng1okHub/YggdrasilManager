@@ -79,6 +79,7 @@ class HideDbgViewModelTest {
         assertEquals("cached warning", state.message)
         coVerify(exactly = 1) { installedAppsSource.load() }
         coVerify(exactly = 0) { repo.setHideDbg(any(), any()) }
+        coVerify(exactly = 0) { configStore.save(any()) }
     }
 
     @Test
@@ -313,19 +314,109 @@ class HideDbgViewModelTest {
 
     @Test
     fun toggleUid_distinctRapidTogglesSaveCumulativeSnapshotsInOrder() = runTest {
+        val firstKpmResult = CompletableDeferred<Result<Unit>>()
+        coEvery { repo.setHideDbg(true, 1000) } coAnswers { firstKpmResult.await() }
         val viewModel = createViewModel()
         advanceUntilIdle()
 
         viewModel.toggleUid(1000)
+        runCurrent()
+        coVerify(exactly = 1) { repo.setHideDbg(true, 1000) }
+
         viewModel.toggleUid(1001)
-        advanceUntilIdle()
+        runCurrent()
+
+        try {
+            coVerify(exactly = 0) { repo.setHideDbg(true, 1001) }
+            coVerify(exactly = 0) { configStore.save(any()) }
+            assertEquals(setOf(1000, 1001), viewModel.uiState.value.pendingUids)
+        } finally {
+            firstKpmResult.complete(Result.success(Unit))
+            advanceUntilIdle()
+        }
 
         assertEquals(setOf(1000, 1001), viewModel.uiState.value.enabledUids)
+        assertEquals(emptySet<Int>(), viewModel.uiState.value.pendingUids)
         coVerifyOrder {
             repo.setHideDbg(true, 1000)
             configStore.save(HideDbgConfig(false, setOf(1000)))
             repo.setHideDbg(true, 1001)
             configStore.save(HideDbgConfig(false, setOf(1000, 1001)))
+        }
+        coVerify(exactly = 1) { repo.setHideDbg(true, 1001) }
+        coVerify(exactly = 1) {
+            configStore.save(HideDbgConfig(false, setOf(1000)))
+        }
+        coVerify(exactly = 1) {
+            configStore.save(HideDbgConfig(false, setOf(1000, 1001)))
+        }
+    }
+
+    @Test
+    fun toggleGlobal_uidPendingIgnoresGlobalWithoutQueuingIt() = runTest {
+        val uidKpmResult = CompletableDeferred<Result<Unit>>()
+        coEvery { repo.setHideDbg(true, 1000) } coAnswers { uidKpmResult.await() }
+        val viewModel = createViewModel()
+        advanceUntilIdle()
+
+        viewModel.toggleUid(1000)
+        runCurrent()
+        assertEquals(setOf(1000), viewModel.uiState.value.pendingUids)
+
+        viewModel.toggleGlobal()
+        runCurrent()
+
+        try {
+            assertFalse(viewModel.uiState.value.globalPending)
+            coVerify(exactly = 0) { repo.setHideDbg(any(), null) }
+            coVerify(exactly = 0) { configStore.save(any()) }
+        } finally {
+            uidKpmResult.complete(Result.success(Unit))
+            advanceUntilIdle()
+        }
+
+        assertFalse(viewModel.uiState.value.globalEnabled)
+        assertFalse(viewModel.uiState.value.globalPending)
+        assertEquals(setOf(1000), viewModel.uiState.value.enabledUids)
+        assertEquals(emptySet<Int>(), viewModel.uiState.value.pendingUids)
+        coVerify(exactly = 0) { repo.setHideDbg(any(), null) }
+        coVerify(exactly = 1) {
+            configStore.save(HideDbgConfig(false, setOf(1000)))
+        }
+    }
+
+    @Test
+    fun toggleUid_globalPendingIgnoresUidWithoutQueuingIt() = runTest {
+        val globalKpmResult = CompletableDeferred<Result<Unit>>()
+        coEvery { repo.setHideDbg(true, null) } coAnswers { globalKpmResult.await() }
+        val viewModel = createViewModel(
+            HideDbgConfig(globalEnabled = false, enabledUids = setOf(1000))
+        )
+        advanceUntilIdle()
+
+        viewModel.toggleGlobal()
+        runCurrent()
+        assertTrue(viewModel.uiState.value.globalPending)
+
+        viewModel.toggleUid(1001)
+        runCurrent()
+
+        try {
+            assertEquals(emptySet<Int>(), viewModel.uiState.value.pendingUids)
+            coVerify(exactly = 0) { repo.setHideDbg(any(), 1001) }
+            coVerify(exactly = 0) { configStore.save(any()) }
+        } finally {
+            globalKpmResult.complete(Result.success(Unit))
+            advanceUntilIdle()
+        }
+
+        assertTrue(viewModel.uiState.value.globalEnabled)
+        assertFalse(viewModel.uiState.value.globalPending)
+        assertEquals(setOf(1000), viewModel.uiState.value.enabledUids)
+        assertEquals(emptySet<Int>(), viewModel.uiState.value.pendingUids)
+        coVerify(exactly = 0) { repo.setHideDbg(any(), 1001) }
+        coVerify(exactly = 1) {
+            configStore.save(HideDbgConfig(true, setOf(1000)))
         }
     }
 
