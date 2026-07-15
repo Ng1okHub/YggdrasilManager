@@ -10,7 +10,6 @@ import kotlinx.coroutines.test.runTest
 import ng1ok.yggdrasilmanager.data.hidedbg.HideDbgConfig
 import ng1ok.yggdrasilmanager.data.hidedbg.SharedPreferencesHideDbgConfigStore
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -50,7 +49,7 @@ class HideDbgConfigStoreTest {
         )
 
         assertEquals(HideDbgConfig(), store.current)
-        assertNotNull(store.loadWarning)
+        assertEquals("不支援的 Hide DBG 配置版本：2", store.loadWarning)
     }
 
     @Test

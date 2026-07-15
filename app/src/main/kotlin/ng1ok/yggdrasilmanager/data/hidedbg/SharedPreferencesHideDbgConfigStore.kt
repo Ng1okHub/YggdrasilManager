@@ -59,7 +59,7 @@ class SharedPreferencesHideDbgConfigStore(
         if (schemaVersion != SCHEMA_VERSION) {
             LoadedConfig(
                 config = HideDbgConfig(),
-                warning = "不支持的 Hide DBG 配置版本：$schemaVersion"
+                warning = "不支援的 Hide DBG 配置版本：$schemaVersion"
             )
         } else {
             LoadedConfig(
