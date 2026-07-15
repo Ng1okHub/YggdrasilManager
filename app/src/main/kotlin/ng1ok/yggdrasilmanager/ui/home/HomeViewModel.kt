@@ -26,22 +26,18 @@ class HomeViewModel(
     private var startupChecksStarted = false
 
     fun startStartupChecks() {
-        startStartupChecks(precheckedRootGranted = null)
-    }
-
-    private fun startStartupChecks(precheckedRootGranted: Boolean?) {
         if (startupChecksStarted) return
         startupChecksStarted = true
 
         viewModelScope.launch {
             launch {
-                val rootGranted = precheckedRootGranted ?: performStartupCheck {
+                val granted = performStartupCheck {
                     rootStatusSource.isRootGranted()
                 }
 
                 _uiState.update { state ->
                     when {
-                        rootGranted -> state.copy(rootStatus = RootStatus.GRANTED)
+                        granted -> state.copy(rootStatus = RootStatus.GRANTED)
                         state.hasShownRootDeniedPrompt -> state.copy(rootStatus = RootStatus.DENIED)
                         else -> state.copy(
                             rootStatus = RootStatus.DENIED,
@@ -76,10 +72,6 @@ class HomeViewModel(
         throw exception
     } catch (_: Exception) {
         false
-    }
-
-    fun refresh(rootGranted: Boolean) {
-        startStartupChecks(precheckedRootGranted = rootGranted)
     }
 
     fun dismissRootDeniedDialog() {
