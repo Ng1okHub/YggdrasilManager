@@ -5,6 +5,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -34,9 +35,9 @@ class HomeViewModel(
 
         viewModelScope.launch {
             launch {
-                val rootGranted = precheckedRootGranted ?: runCatching {
+                val rootGranted = precheckedRootGranted ?: performStartupCheck {
                     rootStatusSource.isRootGranted()
-                }.getOrDefault(false)
+                }
 
                 _uiState.update { state ->
                     when {
@@ -52,9 +53,9 @@ class HomeViewModel(
             }
 
             launch {
-                val available = runCatching {
+                val available = performStartupCheck {
                     repo.checkAvailable()
-                }.getOrDefault(false)
+                }
 
                 _uiState.update { state ->
                     state.copy(
@@ -67,6 +68,14 @@ class HomeViewModel(
                 }
             }
         }
+    }
+
+    private suspend fun performStartupCheck(check: suspend () -> Boolean): Boolean = try {
+        check()
+    } catch (exception: CancellationException) {
+        throw exception
+    } catch (_: Exception) {
+        false
     }
 
     fun refresh(rootGranted: Boolean) {

@@ -4,6 +4,7 @@ import io.mockk.coEvery
 import io.mockk.coVerify
 import io.mockk.every
 import io.mockk.mockk
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -133,6 +134,20 @@ class HomeViewModelTest {
         assertEquals(RootStatus.DENIED, viewModel.uiState.value.rootStatus)
         assertEquals(YggdrasilStatus.UNAVAILABLE, viewModel.uiState.value.yggdrasilStatus)
         assertTrue(viewModel.uiState.value.showRootDeniedDialog)
+    }
+
+    @Test
+    fun startupCheckCancellation_doesNotPublishFailureStates() = runTest {
+        coEvery { rootStatusSource.isRootGranted() } throws CancellationException("cancelled")
+        coEvery { repo.checkAvailable() } throws CancellationException("cancelled")
+        val viewModel = createViewModel()
+
+        viewModel.startStartupChecks()
+        advanceUntilIdle()
+
+        assertEquals(RootStatus.CHECKING, viewModel.uiState.value.rootStatus)
+        assertEquals(YggdrasilStatus.CHECKING, viewModel.uiState.value.yggdrasilStatus)
+        assertFalse(viewModel.uiState.value.showRootDeniedDialog)
     }
 
     private fun createViewModel() = HomeViewModel(
