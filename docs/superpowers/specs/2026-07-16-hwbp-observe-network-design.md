@@ -50,8 +50,8 @@ Responsibilities:
 
 Changes:
 - Remove `_events: StateFlow<List<HwbpEvent>>` and all event-collection logic (events go to the web client now).
-- On `init`: instantiate and start `HwbpWebServer`.
-- On `onCleared()`: stop `HwbpWebServer` (in addition to existing `repo.stopEventStream()`).
+- On `init`: call `repo.startEventStream()` (unchanged), then instantiate and start `HwbpWebServer`. Server auto-starts — no manual toggle required at launch.
+- On `onCleared()`: stop `HwbpWebServer`, then call `repo.stopEventStream()`.
 - Keep `observePoints: StateFlow<List<HwbpObserveParams>>` — the server reads this to build the `state` message for new connections.
 - `addObserve` / `removeObserve` remain; they update `observePoints` and also trigger a `state` broadcast so connected clients stay in sync.
 
@@ -109,7 +109,8 @@ All messages are UTF-8 JSON. `type` is always present.
 ```json
 // Sent immediately on new connection; also broadcast after any add/remove
 { "type": "state",
-  "points": [{ "pid": 1234, "addr": "0x7ff0001000", "mode": "RW", "len": 8 }] }
+  "points": [{ "pid": 1234, "addr": "0x7ff0001000", "mode": "RW", "len": 8,
+               "flags": 0, "stackSize": 256 }] }
 
 // Fired for each kernel HWBP event
 { "type": "event", "seq": 42, "dropped": 0, "comm": "target_app",
@@ -126,10 +127,10 @@ All messages are UTF-8 JSON. `type` is always present.
 
 Add to `app/build.gradle.kts`:
 ```kotlin
-implementation("io.ktor:ktor-server-core:2.3.x")
-implementation("io.ktor:ktor-server-cio:2.3.x")
-implementation("io.ktor:ktor-server-websockets:2.3.x")
-implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.x")
+implementation("io.ktor:ktor-server-core:2.3.12")
+implementation("io.ktor:ktor-server-cio:2.3.12")
+implementation("io.ktor:ktor-server-websockets:2.3.12")
+implementation("io.ktor:ktor-serialization-kotlinx-json:2.3.12")
 ```
 
 Ktor CIO runs on coroutines; no additional threading primitives needed.
