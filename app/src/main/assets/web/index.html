@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>HWBP Observe</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        letter-spacing: 0;
+        color: #17221d;
+        background: #f3f6f4;
+        --surface: #ffffff;
+        --surface-muted: #eef2ef;
+        --border: #d3dcd6;
+        --text-muted: #5b6962;
+        --green: #176b3a;
+        --green-hover: #10582f;
+        --amber: #9a6200;
+        --red: #b42318;
+        --red-muted: #fff0ee;
+      }
+
+      * {
+        box-sizing: border-box;
+        letter-spacing: 0;
+      }
+
+      body {
+        margin: 0;
+        min-width: 320px;
+        min-height: 100vh;
+        background: #f3f6f4;
+      }
+
+      button,
+      input {
+        font: inherit;
+      }
+
+      button {
+        cursor: pointer;
+      }
+
+      header {
+        height: 64px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 0 24px;
+        color: #ffffff;
+        background: #17221d;
+        border-bottom: 1px solid #2c3a33;
+      }
+
+      header h1 {
+        margin: 0;
+        font-size: 20px;
+        line-height: 1.2;
+        font-weight: 680;
+      }
+
+      #connection-state {
+        display: inline-flex;
+        align-items: center;
+        min-height: 28px;
+        padding: 4px 10px;
+        border: 1px solid #6c7a73;
+        border-radius: 5px;
+        color: #dce4df;
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      #connection-state[data-state="connected"] {
+        color: #c9f4d7;
+        border-color: #4fac70;
+      }
+
+      #connection-state[data-state="connecting"] {
+        color: #ffd995;
+        border-color: #b88122;
+      }
+
+      #connection-state[data-state="disconnected"] {
+        color: #ffc8c2;
+        border-color: #c96a60;
+      }
+
+      main {
+        display: grid;
+        grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+        min-height: calc(100vh - 64px);
+      }
+
+      .control-rail {
+        padding: 24px;
+        background: var(--surface);
+        border-right: 1px solid var(--border);
+      }
+
+      .events-pane {
+        min-width: 0;
+        padding: 24px;
+      }
+
+      .section-heading {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 16px;
+        min-height: 36px;
+        margin-bottom: 14px;
+      }
+
+      .section-heading h2 {
+        margin: 0;
+        font-size: 16px;
+        line-height: 1.25;
+      }
+
+      .count {
+        color: var(--text-muted);
+        font-size: 13px;
+        font-variant-numeric: tabular-nums;
+      }
+
+      form {
+        display: grid;
+        gap: 14px;
+        padding-bottom: 24px;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .field {
+        display: grid;
+        gap: 6px;
+      }
+
+      .field > label,
+      fieldset legend {
+        color: var(--text-muted);
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      input[type="number"],
+      input[type="text"] {
+        width: 100%;
+        height: 42px;
+        padding: 0 11px;
+        color: #17221d;
+        background: #ffffff;
+        border: 1px solid #aebbb3;
+        border-radius: 5px;
+        outline: none;
+      }
+
+      input[type="number"]:focus,
+      input[type="text"]:focus {
+        border-color: var(--green);
+        box-shadow: 0 0 0 2px #d7ebdf;
+      }
+
+      fieldset {
+        min-width: 0;
+        margin: 0;
+        padding: 0;
+        border: 0;
+      }
+
+      fieldset legend {
+        margin-bottom: 6px;
+      }
+
+      .segments {
+        display: grid;
+        grid-auto-flow: column;
+        grid-auto-columns: 1fr;
+        height: 38px;
+        overflow: hidden;
+        border: 1px solid #aebbb3;
+        border-radius: 5px;
+      }
+
+      .segments label {
+        position: relative;
+        display: grid;
+        place-items: center;
+        min-width: 0;
+        color: var(--text-muted);
+        background: #ffffff;
+        border-left: 1px solid var(--border);
+        font-size: 13px;
+        font-weight: 650;
+        user-select: none;
+        cursor: pointer;
+      }
+
+      .segments label:first-of-type {
+        border-left: 0;
+      }
+
+      .segments input {
+        position: absolute;
+        opacity: 0;
+        pointer-events: none;
+      }
+
+      .segments label:has(input:checked) {
+        color: #ffffff;
+        background: var(--green);
+      }
+
+      .segments label:has(input:disabled) {
+        color: #9ba69f;
+        background: var(--surface-muted);
+        cursor: not-allowed;
+      }
+
+      .primary-command {
+        height: 42px;
+        color: #ffffff;
+        background: var(--green);
+        border: 1px solid var(--green);
+        border-radius: 5px;
+        font-weight: 680;
+      }
+
+      .primary-command:hover {
+        background: var(--green-hover);
+      }
+
+      #form-error {
+        min-height: 20px;
+        margin: -4px 0 0;
+        color: var(--red);
+        font-size: 13px;
+      }
+
+      #form-error[hidden] {
+        display: block;
+        visibility: hidden;
+      }
+
+      .points-section {
+        padding-top: 20px;
+      }
+
+      #points,
+      #events {
+        border-top: 1px solid var(--border);
+      }
+
+      .point-row {
+        min-height: 64px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 10px 0;
+        border-bottom: 1px solid var(--border);
+      }
+
+      .point-row > div {
+        display: grid;
+        min-width: 0;
+        gap: 3px;
+        flex: 1;
+      }
+
+      .point-row strong {
+        font-size: 14px;
+      }
+
+      .point-row span {
+        overflow-wrap: anywhere;
+        color: var(--text-muted);
+        font-family: "Cascadia Mono", Consolas, monospace;
+        font-size: 12px;
+      }
+
+      .remove-command {
+        height: 34px;
+        padding: 0 10px;
+        color: var(--red);
+        background: var(--red-muted);
+        border: 1px solid #efb7b0;
+        border-radius: 5px;
+        font-size: 13px;
+        font-weight: 650;
+      }
+
+      .clear-command {
+        min-height: 34px;
+        padding: 0 4px;
+        color: var(--green);
+        background: transparent;
+        border: 0;
+        font-size: 13px;
+        font-weight: 680;
+      }
+
+      .empty-state {
+        margin: 0;
+        padding: 24px 4px;
+        color: var(--text-muted);
+        font-size: 14px;
+      }
+
+      .event-row {
+        background: var(--surface);
+        border-bottom: 1px solid var(--border);
+      }
+
+      .event-row summary {
+        min-height: 58px;
+        display: grid;
+        grid-template-columns: minmax(120px, 1fr) minmax(140px, auto) auto;
+        align-items: center;
+        gap: 16px;
+        padding: 10px 14px;
+        cursor: pointer;
+      }
+
+      .event-identity {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 680;
+      }
+
+      .event-context {
+        color: var(--text-muted);
+        font-family: "Cascadia Mono", Consolas, monospace;
+        font-size: 12px;
+      }
+
+      .dropped-count {
+        color: var(--amber);
+        font-size: 12px;
+        font-weight: 680;
+      }
+
+      .event-details {
+        display: grid;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 8px 20px;
+        padding: 4px 14px 16px 32px;
+      }
+
+      .event-details > div,
+      .register-grid > div {
+        display: grid;
+        gap: 2px;
+        min-width: 0;
+      }
+
+      .event-details span {
+        color: var(--text-muted);
+        font-size: 11px;
+        text-transform: uppercase;
+      }
+
+      .event-details code {
+        min-width: 0;
+        overflow-wrap: anywhere;
+        color: #27342d;
+        font-size: 12px;
+      }
+
+      .register-grid {
+        grid-column: 1 / -1;
+        display: grid;
+        grid-template-columns: repeat(auto-fill, minmax(128px, 1fr));
+        gap: 10px 16px;
+        padding-top: 10px;
+        border-top: 1px solid var(--border);
+      }
+
+      @media (max-width: 760px) {
+        header {
+          padding: 0 16px;
+        }
+
+        main {
+          grid-template-columns: minmax(0, 1fr);
+        }
+
+        .control-rail {
+          padding: 20px 16px;
+          border-right: 0;
+          border-bottom: 1px solid var(--border);
+        }
+
+        .events-pane {
+          padding: 20px 16px;
+        }
+
+        .event-row summary {
+          grid-template-columns: minmax(0, 1fr) auto;
+          gap: 6px 12px;
+        }
+
+        .event-context {
+          grid-column: 1;
+        }
+
+        .dropped-count {
+          grid-column: 2;
+          grid-row: 1 / span 2;
+        }
+
+        .event-details {
+          grid-template-columns: minmax(0, 1fr);
+          padding-left: 22px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>HWBP Observe</h1>
+      <span id="connection-state" data-state="connecting" role="status">Connecting</span>
+    </header>
+    <main>
+      <aside class="control-rail">
+        <section aria-labelledby="observe-heading">
+          <div class="section-heading">
+            <h2 id="observe-heading">Observe point</h2>
+          </div>
+          <form id="observe-form">
+            <div class="field">
+              <label for="pid">Target PID</label>
+              <input id="pid" name="pid" type="number" min="1" step="1" required>
+            </div>
+            <div class="field">
+              <label for="addr">Address</label>
+              <input id="addr" name="addr" type="text" inputmode="text" placeholder="0x7ff0001000" required>
+            </div>
+            <fieldset id="mode-group">
+              <legend>Mode</legend>
+              <div class="segments">
+                <label><input type="radio" name="mode" value="R" checked>R</label>
+                <label><input type="radio" name="mode" value="W">W</label>
+                <label><input type="radio" name="mode" value="RW">RW</label>
+                <label><input type="radio" name="mode" value="X">X</label>
+              </div>
+            </fieldset>
+            <fieldset id="len-group">
+              <legend>Length</legend>
+              <div class="segments">
+                <label><input type="radio" name="len" value="1">1</label>
+                <label><input type="radio" name="len" value="2">2</label>
+                <label><input type="radio" name="len" value="4" checked>4</label>
+                <label><input type="radio" name="len" value="8">8</label>
+              </div>
+            </fieldset>
+            <button class="primary-command" type="submit">Add observe point</button>
+            <p id="form-error" role="alert" hidden></p>
+          </form>
+        </section>
+
+        <section class="points-section" aria-labelledby="points-heading">
+          <div class="section-heading">
+            <h2 id="points-heading">Active points</h2>
+            <span class="count"><span id="point-count">0</span> total</span>
+          </div>
+          <div id="points"></div>
+        </section>
+      </aside>
+
+      <section class="events-pane" aria-labelledby="events-heading">
+        <div class="section-heading">
+          <h2 id="events-heading">Events <span class="count" id="event-count">0</span></h2>
+          <button id="clear-events" class="clear-command" type="button">Clear events</button>
+        </div>
+        <div id="events"></div>
+      </section>
+    </main>
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>
