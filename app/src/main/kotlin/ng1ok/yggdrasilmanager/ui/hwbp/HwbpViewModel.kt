@@ -18,10 +18,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import ng1ok.yggdrasilmanager.App
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
-import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
-
-private const val MAX_EVENTS = 200
 
 data class HwbpUiState(
     val serverRunning: Boolean = false,
@@ -30,6 +27,8 @@ data class HwbpUiState(
     val webSocketUrl: String? = null,
     val observePointCount: Int = 0,
 )
+
+fun HwbpUiState.serverStatusLabel(): String = if (serverRunning) "Running" else "Stopped"
 
 class HwbpViewModel internal constructor(
     private val repo: YggdrasilRepository,
@@ -40,9 +39,6 @@ class HwbpViewModel internal constructor(
 
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
-
-    private val _events = MutableStateFlow<List<HwbpEvent>>(emptyList())
-    val events: StateFlow<List<HwbpEvent>> = _events.asStateFlow()
 
     private val mutationMutex = Mutex()
     private val server: HwbpServer
@@ -59,9 +55,6 @@ class HwbpViewModel internal constructor(
                 unobserve = ::unobserve,
             )
         )
-        viewModelScope.launch {
-            repo.hwbpEvents.collect(::appendEvent)
-        }
         uiState = combine(
             server.running,
             server.connectedClients,
@@ -111,19 +104,6 @@ class HwbpViewModel internal constructor(
 
     fun dismissError() {
         _error.value = null
-    }
-
-    fun clearEvents() {
-        _events.value = emptyList()
-    }
-
-    private fun appendEvent(event: HwbpEvent) {
-        val current = _events.value
-        _events.value = if (current.size >= MAX_EVENTS) {
-            current.drop(1) + event
-        } else {
-            current + event
-        }
     }
 
     private suspend fun observe(params: HwbpObserveParams): Result<Unit> =
