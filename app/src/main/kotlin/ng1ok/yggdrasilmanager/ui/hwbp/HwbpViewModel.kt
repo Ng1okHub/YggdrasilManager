@@ -12,12 +12,17 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import ng1ok.yggdrasilmanager.App
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
+import ng1ok.yggdrasilmanager.data.model.HwbpBacktrace
+import ng1ok.yggdrasilmanager.data.model.HwbpEvent
+import ng1ok.yggdrasilmanager.data.model.HwbpEventEnricher
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
 
 data class HwbpUiState(
@@ -26,6 +31,7 @@ data class HwbpUiState(
     val httpUrl: String? = null,
     val webSocketUrl: String? = null,
     val observePointCount: Int = 0,
+    val backtraceMode: String = HwbpBacktrace.MODE_FP,
 )
 
 fun HwbpUiState.serverStatusLabel(): String = if (serverRunning) "Running" else "Stopped"
@@ -37,6 +43,9 @@ class HwbpViewModel internal constructor(
     private val _observePoints = MutableStateFlow<List<HwbpObserveParams>>(emptyList())
     val observePoints: StateFlow<List<HwbpObserveParams>> = _observePoints.asStateFlow()
 
+    private val _backtraceMode = MutableStateFlow(HwbpBacktrace.MODE_FP)
+    val backtraceMode: StateFlow<String> = _backtraceMode.asStateFlow()
+
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
@@ -47,12 +56,17 @@ class HwbpViewModel internal constructor(
 
     init {
         repo.startEventStream()
+        val enrichedEvents = repo.hwbpEvents.map { event ->
+            enrichEvent(event)
+        }.flowOn(Dispatchers.IO)
         server = serverFactory.create(
             HwbpServerBindings(
-                events = repo.hwbpEvents,
+                events = enrichedEvents,
                 points = { _observePoints.value },
+                backtraceMode = { _backtraceMode.value },
                 observe = ::observe,
                 unobserve = ::unobserve,
+                setBacktraceMode = ::setBacktraceMode,
             )
         )
         uiState = combine(
@@ -60,14 +74,15 @@ class HwbpViewModel internal constructor(
             server.connectedClients,
             server.httpUrl,
             server.webSocketUrl,
-            observePoints,
-        ) { running, clients, httpUrl, webSocketUrl, points ->
+            combine(observePoints, backtraceMode) { points, mode -> points to mode },
+        ) { running, clients, httpUrl, webSocketUrl, pointsAndMode ->
             HwbpUiState(
                 serverRunning = running,
                 connectedClients = clients,
                 httpUrl = httpUrl,
                 webSocketUrl = webSocketUrl,
-                observePointCount = points.size,
+                observePointCount = pointsAndMode.first.size,
+                backtraceMode = pointsAndMode.second,
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, HwbpUiState())
 
@@ -105,6 +120,18 @@ class HwbpViewModel internal constructor(
     fun dismissError() {
         _error.value = null
     }
+
+    private fun setBacktraceMode(mode: String): Result<Unit> {
+        _backtraceMode.value = HwbpBacktrace.normalizeMode(mode)
+        return Result.success(Unit)
+    }
+
+    private fun enrichEvent(event: HwbpEvent): HwbpEvent =
+        HwbpEventEnricher.enrich(
+            event = event,
+            mode = _backtraceMode.value,
+            native = repo.nativeApi,
+        )
 
     private suspend fun observe(params: HwbpObserveParams): Result<Unit> =
         mutationMutex.withLock {
@@ -145,7 +172,7 @@ class HwbpViewModel internal constructor(
                 HwbpViewModel(
                     repo = YggdrasilRepository.instance,
                     serverFactory = HwbpServerFactory { bindings ->
-                        HwbpWebServer(application.applicationContext, bindings)
+                        HwbpWebServer(application, bindings)
                     },
                 )
             }

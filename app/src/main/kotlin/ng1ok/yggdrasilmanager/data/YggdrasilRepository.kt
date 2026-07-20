@@ -21,14 +21,48 @@ class YggdrasilRepository(
     )
     val hwbpEvents: SharedFlow<HwbpEvent> = _hwbpEvents.asSharedFlow()
 
+    val nativeApi: YggdrasilNativeApi get() = native
+
     private val callback = object : HwbpEventCallback {
         override fun onEvent(
-            seq: Long, dropped: Long, tid: Int, tgid: Int, comm: String,
-            mode: Int, len: Int, flags: Int, watchedAddr: Long,
-            pc: Long, sp: Long, regs: LongArray
+            seq: Long,
+            dropped: Long,
+            tid: Int,
+            tgid: Int,
+            comm: String,
+            mode: Int,
+            len: Int,
+            flags: Int,
+            watchedAddr: Long,
+            pc: Long,
+            sp: Long,
+            pstate: Long,
+            stackAddr: Long,
+            stackRequestedSize: Int,
+            stackCopiedSize: Int,
+            regs: LongArray,
+            stack: ByteArray,
         ) {
             _hwbpEvents.tryEmit(
-                HwbpEvent(seq, dropped, tid, tgid, comm, mode, len, flags, watchedAddr, pc, sp, regs)
+                HwbpEvent(
+                    seq = seq,
+                    dropped = dropped,
+                    tid = tid,
+                    tgid = tgid,
+                    comm = comm,
+                    mode = mode,
+                    len = len,
+                    flags = flags,
+                    watchedAddr = watchedAddr,
+                    pc = pc,
+                    sp = sp,
+                    regs = regs,
+                    pstate = pstate,
+                    stackAddr = stackAddr,
+                    stackRequestedSize = stackRequestedSize,
+                    stackCopiedSize = stackCopiedSize,
+                    stack = stack,
+                )
             )
         }
     }
@@ -38,7 +72,14 @@ class YggdrasilRepository(
     }
 
     suspend fun hwbpObserve(params: HwbpObserveParams): Result<Unit> = withContext(Dispatchers.IO) {
-        val ret = native.hwbpObserve(params.pid, params.targetAddr, params.mode, params.len, params.flags, params.stackSize)
+        val ret = native.hwbpObserve(
+            params.pid,
+            params.targetAddr,
+            params.mode,
+            params.len,
+            params.flags,
+            params.stackSize,
+        )
         if (ret == 0) Result.success(Unit) else Result.failure(RuntimeException("prctl errno ${-ret}"))
     }
 

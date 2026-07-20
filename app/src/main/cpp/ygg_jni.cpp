@@ -5,7 +5,13 @@
 #include <time.h>
 #include <pthread.h>
 #include <atomic>
+#include <cinttypes>
+#include <cstdio>
+#include <string>
+#include <vector>
+
 #include "yggdrasil.h"
+#include "ygg_backtrace.h"
 
 static JavaVM *g_jvm = nullptr;
 static jobject g_callback_ref = nullptr;
@@ -97,14 +103,30 @@ static void *listen_thread(void *) {
         if (!regs) { env->DeleteLocalRef(comm); env->ExceptionClear(); continue; }
         env->SetLongArrayRegion(regs, 0, 31, (const jlong *)h->regs.regs);
 
+        uint32_t stack_len = h->stack_copied_size;
+        if (stack_len > YGG_HWBP_EVENT_STACK_MAX) stack_len = YGG_HWBP_EVENT_STACK_MAX;
+        if (!(h->flags & YGG_HWBP_EVENT_FLAG_STACK)) stack_len = 0;
+        jbyteArray stack = env->NewByteArray((jsize)stack_len);
+        if (!stack) {
+            env->DeleteLocalRef(comm);
+            env->DeleteLocalRef(regs);
+            env->ExceptionClear();
+            continue;
+        }
+        if (stack_len > 0) {
+            env->SetByteArrayRegion(stack, 0, (jsize)stack_len, (const jbyte *)rec.stack);
+        }
+
         env->CallVoidMethod(g_callback_ref, g_on_event_mid,
             (jlong)h->seq, (jlong)h->dropped,
             (jint)h->tid,  (jint)h->tgid,
             comm,
             (jint)h->mode, (jint)h->len, (jint)h->flags,
             (jlong)h->watched_addr,
-            (jlong)h->regs.pc, (jlong)h->regs.sp,
-            regs);
+            (jlong)h->regs.pc, (jlong)h->regs.sp, (jlong)h->regs.pstate,
+            (jlong)h->stack_addr,
+            (jint)h->stack_requested_size, (jint)stack_len,
+            regs, stack);
 
         if (env->ExceptionCheck()) {
             env->ExceptionClear();
@@ -112,6 +134,7 @@ static void *listen_thread(void *) {
 
         env->DeleteLocalRef(comm);
         env->DeleteLocalRef(regs);
+        env->DeleteLocalRef(stack);
     }
 
     g_jvm->DetachCurrentThread();
@@ -125,9 +148,8 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hwbpStartListen(
     g_callback_ref = env->NewGlobalRef(callback);
 
     jclass cls = env->GetObjectClass(callback);
-    // Signature: (JJIILjava/lang/String;IIIJJJ[J)V
     g_on_event_mid = env->GetMethodID(cls, "onEvent",
-        "(JJIILjava/lang/String;IIIJJJ[J)V");
+        "(JJIILjava/lang/String;IIIJJJJJII[J[B)V");
 
     g_stop.store(false);
     if (pthread_create(&g_listen_thread, nullptr, listen_thread, nullptr) != 0) {
@@ -147,4 +169,121 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hwbpStopListen(JNIEnv *env, j
         env->DeleteGlobalRef(g_callback_ref);
         g_callback_ref = nullptr;
     }
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_nativeHwbpUnwindDwarf(
+        JNIEnv *env, jobject,
+        jint pid, jint flags,
+        jlongArray regsArr, jlong pc, jlong sp, jlong pstate,
+        jlong stackAddr, jbyteArray stackArr, jstring mapsText) {
+    (void)flags;
+    if (!regsArr) return nullptr;
+
+    jsize reg_count = env->GetArrayLength(regsArr);
+    if (reg_count < 31) return nullptr;
+
+    ygg_hwbp_user_regs_snapshot snap = {};
+    jlong *reg_elems = env->GetLongArrayElements(regsArr, nullptr);
+    if (!reg_elems) return nullptr;
+    for (int i = 0; i < 31; ++i) snap.regs[i] = (uint64_t)reg_elems[i];
+    env->ReleaseLongArrayElements(regsArr, reg_elems, JNI_ABORT);
+    snap.pc = (uint64_t)pc;
+    snap.sp = (uint64_t)sp;
+    snap.pstate = (uint64_t)pstate;
+
+    const uint8_t *stack_ptr = nullptr;
+    jsize stack_len = 0;
+    jbyte *stack_elems = nullptr;
+    if (stackArr) {
+        stack_len = env->GetArrayLength(stackArr);
+        if (stack_len > 0) {
+            stack_elems = env->GetByteArrayElements(stackArr, nullptr);
+            stack_ptr = reinterpret_cast<const uint8_t *>(stack_elems);
+        }
+    }
+
+    std::vector<YggBacktraceFrame> frames;
+    std::string error;
+    const char *maps_cstr = nullptr;
+    if (mapsText) {
+        maps_cstr = env->GetStringUTFChars(mapsText, nullptr);
+    }
+
+    ygg_unwind_dwarf(
+        (uint32_t)pid, snap, (uint64_t)stackAddr,
+        stack_ptr, (uint32_t)stack_len, maps_cstr, &frames, &error);
+
+    if (maps_cstr) {
+        env->ReleaseStringUTFChars(mapsText, maps_cstr);
+    }
+    if (stack_elems) {
+        env->ReleaseByteArrayElements(stackArr, stack_elems, JNI_ABORT);
+    }
+
+    jclass string_cls = env->FindClass("java/lang/String");
+    if (!string_cls) return nullptr;
+
+    // packed[0] = note/error, packed[1..] = "pc\u0001label\u0001module\u0001offset"
+    jsize out_len = (jsize)(1 + frames.size());
+    jobjectArray out = env->NewObjectArray(out_len, string_cls, nullptr);
+    if (!out) return nullptr;
+
+    std::string note = error;
+    jstring note_j = env->NewStringUTF(note.c_str());
+    if (!note_j) return nullptr;
+    env->SetObjectArrayElement(out, 0, note_j);
+    env->DeleteLocalRef(note_j);
+
+    for (size_t i = 0; i < frames.size(); ++i) {
+        const YggBacktraceFrame &f = frames[i];
+        char pc_hex[32];
+        snprintf(pc_hex, sizeof(pc_hex), "%" PRIx64, (uint64_t)f.pc);
+        std::string packed = std::string(pc_hex);
+        packed.push_back('\1');
+        packed += f.label;
+        packed.push_back('\1');
+        packed += f.module;
+        packed.push_back('\1');
+        packed += f.offset_hex;
+        jstring row = env->NewStringUTF(packed.c_str());
+        if (!row) return nullptr;
+        env->SetObjectArrayElement(out, (jsize)(i + 1), row);
+        env->DeleteLocalRef(row);
+    }
+    return out;
+}
+
+extern "C" JNIEXPORT jlong JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_nativeHwbpResolveLibraryTarget(
+        JNIEnv *env, jobject,
+        jint pid, jstring mapsText, jstring library, jlong offset) {
+    if (!mapsText || !library) {
+        jclass exception_cls = env->FindClass("java/lang/IllegalArgumentException");
+        if (exception_cls) env->ThrowNew(exception_cls, "mapsText and library are required");
+        return 0;
+    }
+
+    const char *maps_cstr = env->GetStringUTFChars(mapsText, nullptr);
+    if (!maps_cstr) return 0;
+    const char *library_cstr = env->GetStringUTFChars(library, nullptr);
+    if (!library_cstr) {
+        env->ReleaseStringUTFChars(mapsText, maps_cstr);
+        return 0;
+    }
+
+    uint64_t address = 0;
+    std::string error;
+    const bool ok = ygg_resolve_library_target(
+        static_cast<uint32_t>(pid), maps_cstr, library_cstr,
+        static_cast<uint64_t>(offset), &address, &error);
+
+    env->ReleaseStringUTFChars(library, library_cstr);
+    env->ReleaseStringUTFChars(mapsText, maps_cstr);
+    if (!ok) {
+        jclass exception_cls = env->FindClass("java/lang/IllegalArgumentException");
+        if (exception_cls) env->ThrowNew(exception_cls, error.c_str());
+        return 0;
+    }
+    return static_cast<jlong>(address);
 }

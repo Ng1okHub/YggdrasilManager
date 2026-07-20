@@ -1,13 +1,17 @@
 export const EVENT_LIMIT = 500;
 export const RECONNECT_DELAY_MS = 3000;
+export const DEFAULT_STACK_SIZE = 4096;
 
 const MODES = new Set(["R", "W", "RW", "X"]);
 const LENGTHS = new Set([1, 2, 4, 8]);
+const BT_MODES = new Set(["fp", "dwarf"]);
 
 export function initialModel() {
   return {
     points: [],
     events: [],
+    backtraceMode: "fp",
+    nextDisplayId: 1,
   };
 }
 
@@ -16,15 +20,26 @@ export function reduceServerMessage(model, message) {
     return {
       ...model,
       points: Array.isArray(message.points) ? [...message.points] : [],
+      backtraceMode: normalizeBacktraceMode(message.backtraceMode ?? model.backtraceMode),
     };
   }
   if (message?.type === "event") {
+    const displayId = Number(model.nextDisplayId) > 0 ? Number(model.nextDisplayId) : 1;
     return {
       ...model,
-      events: [message, ...model.events].slice(0, EVENT_LIMIT),
+      nextDisplayId: displayId + 1,
+      events: [{ ...message, displayId }, ...model.events].slice(0, EVENT_LIMIT),
     };
   }
   return model;
+}
+
+export function clearEventsModel(model) {
+  return {
+    ...model,
+    events: [],
+    nextDisplayId: 1,
+  };
 }
 
 export function buildObserveCommand(values) {
@@ -39,20 +54,35 @@ export function buildObserveCommand(values) {
   }
 
   const stackSize = values.stackSize === undefined || values.stackSize === ""
-    ? 256
+    ? DEFAULT_STACK_SIZE
     : nonNegativeInteger(values.stackSize, "Stack size");
   if (stackSize > 65536) {
     throw new Error("Stack size must be between 0 and 65536");
   }
 
-  return {
+  const targetKind = String(values.targetKind ?? "abs").trim().toLowerCase();
+  const base = {
     type: "observe",
     pid: positiveInteger(values.pid, "PID"),
-    addr: normalizeAddress(values.addr),
     mode,
     len: mode === "X" ? 4 : requestedLength,
     singleThread: Boolean(values.singleThread),
     stackSize,
+  };
+
+  if (targetKind === "lib") {
+    const lib = String(values.lib ?? "").trim();
+    if (!lib) throw new Error("Library name is required");
+    return {
+      ...base,
+      lib,
+      offset: normalizeOffset(values.offset),
+    };
+  }
+
+  return {
+    ...base,
+    addr: normalizeAddress(values.addr),
   };
 }
 
@@ -64,6 +94,21 @@ export function buildUnobserveCommand(values) {
   };
 }
 
+export function buildConfigCommand(values) {
+  return {
+    type: "config",
+    backtraceMode: normalizeBacktraceMode(values.backtraceMode),
+  };
+}
+
+export function normalizeBacktraceMode(value) {
+  const mode = String(value ?? "fp").trim().toLowerCase();
+  if (!BT_MODES.has(mode)) {
+    throw new Error("Backtrace mode must be fp or dwarf");
+  }
+  return mode;
+}
+
 function normalizeAddress(value) {
   const match = String(value ?? "").trim().match(/^(?:0x)?([0-9a-f]+)$/i);
   if (!match || match[1].length > 16) {
@@ -71,6 +116,19 @@ function normalizeAddress(value) {
   }
   const digits = match[1].toLowerCase().replace(/^0+(?=[0-9a-f])/, "");
   return `0x${digits}`;
+}
+
+function normalizeOffset(value) {
+  const text = String(value ?? "").trim();
+  if (!text) throw new Error("Offset is required");
+  if (/^(?:0x)?[0-9a-f]+$/i.test(text)) {
+    return normalizeAddress(text);
+  }
+  const number = Number(text);
+  if (!Number.isInteger(number) || number < 0) {
+    throw new Error("Offset must be a non-negative integer or hex value");
+  }
+  return `0x${number.toString(16)}`;
 }
 
 function positiveInteger(value, label) {
@@ -89,8 +147,170 @@ function nonNegativeInteger(value, label) {
   return number;
 }
 
+const eventCardControllers = new WeakMap();
+
+export function createEventCard(
+  document,
+  event,
+  fallbackBacktraceMode = "fp",
+  initiallyOpen = false,
+) {
+  const details = document.createElement("details");
+  details.className = "event-card";
+
+  const summary = document.createElement("summary");
+  summary.className = "event-summary";
+
+  const left = document.createElement("div");
+  const identity = document.createElement("div");
+  identity.className = "event-identity";
+  identity.textContent = `#${event.displayId ?? event.seq}  ${event.comm ?? "unknown"}`;
+  const context = document.createElement("div");
+  context.className = "event-context";
+  context.textContent = `tid=${event.tid}  tgid=${event.tgid}  kseq=${event.seq}`;
+  left.append(identity, context);
+
+  const meta = document.createElement("div");
+  meta.className = "event-meta";
+  const btBadge = document.createElement("span");
+  btBadge.className = "badge";
+  btBadge.textContent = `bt:${event.backtraceMode || fallbackBacktraceMode}`;
+  meta.append(btBadge);
+  if (Number(event.dropped) > 0) {
+    const dropped = document.createElement("span");
+    dropped.className = "badge warn";
+    dropped.textContent = `dropped ${event.dropped}`;
+    meta.append(dropped);
+  }
+  summary.append(left, meta);
+  details.append(summary);
+
+  let body = null;
+  const syncBody = () => {
+    if (details.open && body === null) {
+      body = createEventBody(document, event);
+      details.append(body);
+    } else if (!details.open && body !== null) {
+      body.remove();
+      body = null;
+    }
+  };
+  eventCardControllers.set(details, { syncBody });
+  details.addEventListener("toggle", syncBody);
+  summary.addEventListener("click", () => {
+    details.dataset.autoOpened = "false";
+  });
+  setEventCardOpen(details, Boolean(initiallyOpen), Boolean(initiallyOpen));
+  return details;
+}
+
+export function prependEventCard(document, container, event, fallbackBacktraceMode = "fp") {
+  const emptyState = container.firstElementChild;
+  if (emptyState?.classList?.contains("empty-state")) emptyState.remove();
+
+  const previousNewest = container.firstElementChild;
+  if (
+    previousNewest?.classList?.contains("event-card") &&
+    previousNewest.dataset.autoOpened === "true"
+  ) {
+    setEventCardOpen(previousNewest, false, false);
+  }
+
+  const card = createEventCard(document, event, fallbackBacktraceMode, true);
+  container.prepend(card);
+  while (container.childElementCount > EVENT_LIMIT) {
+    container.lastElementChild?.remove();
+  }
+  return card;
+}
+
+function setEventCardOpen(card, open, autoOpened) {
+  card.dataset.autoOpened = autoOpened ? "true" : "false";
+  card.open = open;
+  eventCardControllers.get(card)?.syncBody();
+}
+
+function createEventBody(document, event) {
+  const body = document.createElement("div");
+  body.className = "event-body";
+
+  const btHeader = document.createElement("div");
+  btHeader.className = "section-label";
+  const btTitle = document.createElement("span");
+  btTitle.textContent = "Backtrace";
+  btHeader.append(btTitle);
+  body.append(btHeader);
+
+  const frames = Array.isArray(event.backtrace) ? event.backtrace : [];
+  if (event.backtraceNote) {
+    const note = document.createElement("div");
+    note.className = "note";
+    note.textContent = event.backtraceNote;
+    body.append(note);
+  }
+
+  const bt = document.createElement("div");
+  bt.className = "backtrace";
+  if (frames.length === 0) {
+    bt.append(createEmptyState(document, "No frames"));
+  } else {
+    frames.forEach((frame) => {
+      const row = document.createElement("div");
+      row.className = "bt-frame";
+      const idx = document.createElement("div");
+      idx.className = "bt-index";
+      idx.textContent = `#${frame.index ?? 0}`;
+      const content = document.createElement("div");
+      const label = document.createElement("div");
+      label.className = "bt-label";
+      label.textContent = frame.label || frame.pc || "-";
+      const pc = document.createElement("div");
+      pc.className = "bt-pc";
+      pc.textContent = frame.pc || "";
+      content.append(label);
+      if (frame.pc && frame.pc !== frame.label) content.append(pc);
+      row.append(idx, content);
+      bt.append(row);
+    });
+  }
+  body.append(bt);
+
+  const kv = document.createElement("div");
+  kv.className = "kv-grid";
+  kv.append(
+    createValueRow(document, "Watched", event.watchedAddr),
+    createValueRow(document, "PC", event.pc),
+    createValueRow(document, "SP", event.sp),
+  );
+  if (event.stack) {
+    kv.append(
+      createValueRow(
+        document,
+        "Stack",
+        `${event.stack.copied ?? 0}/${event.stack.requested ?? 0} @ ${event.stack.addr ?? "-"}`,
+      ),
+    );
+  }
+  body.append(kv);
+
+  const regsDetails = document.createElement("details");
+  regsDetails.className = "regs-details";
+  const regsSummary = document.createElement("summary");
+  regsSummary.textContent = "Registers (secondary)";
+  const registers = document.createElement("div");
+  registers.className = "register-grid";
+  const registerValues = Array.isArray(event.regs) ? event.regs : [];
+  registerValues.forEach((value, index) => {
+    registers.append(createValueRow(document, `x${index}`, value));
+  });
+  regsDetails.append(regsSummary, registers);
+  body.append(regsDetails);
+  return body;
+}
+
 function startBrowserClient(document, window) {
   const connectionState = document.getElementById("connection-state");
+  const connectionStateText = document.getElementById("connection-state-text");
   const form = document.getElementById("observe-form");
   const formError = document.getElementById("form-error");
   const points = document.getElementById("points");
@@ -99,19 +319,29 @@ function startBrowserClient(document, window) {
   const eventCount = document.getElementById("event-count");
   const clearEvents = document.getElementById("clear-events");
   const modeGroup = document.getElementById("mode-group");
+  const targetKindGroup = document.getElementById("target-kind-group");
+  const btGroup = document.getElementById("bt-group");
+  const btModeLabel = document.getElementById("bt-mode-label");
+  const addrField = document.getElementById("addr-field");
+  const libField = document.getElementById("lib-field");
+  const offsetField = document.getElementById("offset-field");
   const lengthInputs = [...document.querySelectorAll('input[name="len"]')];
+  const btInputs = [...document.querySelectorAll('input[name="backtraceMode"]')];
 
   let model = initialModel();
   let socket = null;
   let reconnectTimer = null;
+  let pendingBacktraceMode = null;
 
   function setConnectionState(state) {
     connectionState.dataset.state = state;
-    connectionState.textContent = {
+    const label = {
       connected: "Connected",
       connecting: "Connecting",
       disconnected: "Disconnected",
     }[state];
+    if (connectionStateText) connectionStateText.textContent = label;
+    else connectionState.textContent = label;
   }
 
   function setFormError(message = "") {
@@ -126,6 +356,34 @@ function startBrowserClient(document, window) {
     }
     socket.send(JSON.stringify(command));
     return true;
+  }
+
+  function syncTargetKind() {
+    const kind = new window.FormData(form).get("targetKind") || "abs";
+    const isLib = kind === "lib";
+    const absFields = document.getElementById("abs-target-fields");
+    const libFields = document.getElementById("lib-target-fields");
+    if (absFields) absFields.classList.toggle("is-hidden", isLib);
+    if (libFields) libFields.classList.toggle("is-hidden", !isLib);
+    // Fallback for older markup.
+    if (addrField) addrField.hidden = isLib;
+    if (libField) libField.hidden = !isLib;
+    if (offsetField) offsetField.hidden = !isLib;
+    form.addr.required = !isLib;
+    form.addr.disabled = isLib;
+    form.lib.required = isLib;
+    form.lib.disabled = !isLib;
+    form.offset.required = isLib;
+    form.offset.disabled = !isLib;
+    if (isLib) form.addr.value = "";
+  }
+
+  function syncBacktraceModeUi() {
+    const mode = model.backtraceMode || "fp";
+    if (btModeLabel) btModeLabel.textContent = mode;
+    btInputs.forEach((input) => {
+      input.checked = input.value === mode;
+    });
   }
 
   function renderPoints() {
@@ -143,8 +401,16 @@ function startBrowserClient(document, window) {
         const title = document.createElement("strong");
         title.textContent = `PID ${point.pid}`;
         const metadata = document.createElement("span");
-        metadata.textContent = `${point.addr} | ${point.mode} | ${point.len} B`;
-        description.append(title, metadata);
+        const display = point.display ||
+          (point.lib && point.offset ? `${point.lib}+${point.offset}` : point.addr);
+        metadata.textContent = `${display} · ${point.mode}/${point.len}B · stack ${point.stackSize ?? "-"}`;
+        if (point.lib && point.addr) {
+          const resolved = document.createElement("span");
+          resolved.textContent = `resolved ${point.addr}`;
+          description.append(title, metadata, resolved);
+        } else {
+          description.append(title, metadata);
+        }
 
         const remove = document.createElement("button");
         remove.type = "button";
@@ -171,50 +437,21 @@ function startBrowserClient(document, window) {
     const fragment = document.createDocumentFragment();
 
     if (model.events.length === 0) {
-      fragment.append(createEmptyState(document, "Waiting for events"));
+      fragment.append(createEmptyState(document, "Waiting for breakpoint hits…"));
     } else {
-      model.events.forEach((event) => {
-        const details = document.createElement("details");
-        details.className = "event-row";
-
-        const summary = document.createElement("summary");
-        const identity = document.createElement("span");
-        identity.className = "event-identity";
-        identity.textContent = `#${event.seq} ${event.comm ?? "unknown"}`;
-        const context = document.createElement("span");
-        context.className = "event-context";
-        context.textContent = `tid=${event.tid} tgid=${event.tgid}`;
-        summary.append(identity, context);
-
-        if (Number(event.dropped) > 0) {
-          const dropped = document.createElement("span");
-          dropped.className = "dropped-count";
-          dropped.textContent = `Dropped ${event.dropped}`;
-          summary.append(dropped);
-        }
-
-        const body = document.createElement("div");
-        body.className = "event-details";
-        body.append(
-          createValueRow(document, "Watched", event.watchedAddr),
-          createValueRow(document, "PC", event.pc),
-          createValueRow(document, "SP", event.sp),
+      model.events.forEach((event, index) => {
+        fragment.append(
+          createEventCard(document, event, model.backtraceMode || "fp", index === 0),
         );
-
-        const registers = document.createElement("div");
-        registers.className = "register-grid";
-        const registerValues = Array.isArray(event.regs) ? event.regs : [];
-        registerValues.forEach((value, index) => {
-          registers.append(createValueRow(document, `x${index}`, value));
-        });
-        body.append(registers);
-
-        details.append(summary, body);
-        fragment.append(details);
       });
     }
 
     events.replaceChildren(fragment);
+  }
+
+  function prependNewestEvent(event) {
+    prependEventCard(document, events, event, model.backtraceMode || "fp");
+    eventCount.textContent = String(model.events.length);
   }
 
   function handleServerMessage(raw) {
@@ -228,15 +465,28 @@ function startBrowserClient(document, window) {
       return;
     }
     if (message.type === "ack") {
-      setFormError(message.ok ? "" : String(message.error || "Request failed"));
+      if (!message.ok) {
+        setFormError(String(message.error || "Request failed"));
+        pendingBacktraceMode = null;
+        return;
+      }
+      setFormError();
+      if (pendingBacktraceMode) {
+        model = { ...model, backtraceMode: pendingBacktraceMode };
+        pendingBacktraceMode = null;
+        syncBacktraceModeUi();
+      }
       return;
     }
 
     const nextModel = reduceServerMessage(model, message);
     if (nextModel === model) return;
     model = nextModel;
-    if (message.type === "state") renderPoints();
-    if (message.type === "event") renderEvents();
+    if (message.type === "state") {
+      renderPoints();
+      syncBacktraceModeUi();
+    }
+    if (message.type === "event") prependNewestEvent(model.events[0]);
   }
 
   function scheduleReconnect() {
@@ -281,14 +531,9 @@ function startBrowserClient(document, window) {
 
   form.addEventListener("submit", (event) => {
     event.preventDefault();
-    const values = new window.FormData(form);
+    const values = Object.fromEntries(new window.FormData(form).entries());
     try {
-      const command = buildObserveCommand({
-        pid: values.get("pid"),
-        addr: values.get("addr"),
-        mode: values.get("mode"),
-        len: values.get("len"),
-      });
+      const command = buildObserveCommand(values);
       if (sendCommand(command)) setFormError();
     } catch (error) {
       setFormError(error.message);
@@ -303,11 +548,26 @@ function startBrowserClient(document, window) {
     });
   });
 
+  targetKindGroup.addEventListener("change", syncTargetKind);
+
+  btGroup.addEventListener("change", () => {
+    try {
+      const mode = new window.FormData(form).get("backtraceMode");
+      const command = buildConfigCommand({ backtraceMode: mode });
+      pendingBacktraceMode = command.backtraceMode;
+      if (!sendCommand(command)) pendingBacktraceMode = null;
+    } catch (error) {
+      setFormError(error.message);
+    }
+  });
+
   clearEvents.addEventListener("click", () => {
-    model = { ...model, events: [] };
+    model = clearEventsModel(model);
     renderEvents();
   });
 
+  syncTargetKind();
+  syncBacktraceModeUi();
   renderPoints();
   renderEvents();
   connect();
@@ -322,6 +582,7 @@ function createEmptyState(document, text) {
 
 function createValueRow(document, label, value) {
   const row = document.createElement("div");
+  row.className = "kv";
   const name = document.createElement("span");
   name.textContent = label;
   const content = document.createElement("code");

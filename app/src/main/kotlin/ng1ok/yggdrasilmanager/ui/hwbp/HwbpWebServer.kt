@@ -44,8 +44,10 @@ internal const val HWBP_SERVER_PORT = 8765
 internal data class HwbpServerBindings(
     val events: Flow<HwbpEvent>,
     val points: () -> List<HwbpObserveParams>,
+    val backtraceMode: () -> String = { "fp" },
     val observe: suspend (HwbpObserveParams) -> Result<Unit>,
     val unobserve: suspend (Int, Long) -> Result<Unit>,
+    val setBacktraceMode: (String) -> Result<Unit> = { Result.success(Unit) },
 )
 
 internal interface HwbpServer {
@@ -122,7 +124,7 @@ internal fun Application.installHwbpWebRoutes(
         webSocket("/ws") {
             hub.add(this)
             try {
-                send(Frame.Text(encodeState(bindings.points())))
+                send(Frame.Text(encodeState(bindings.points(), bindings.backtraceMode())))
                 for (frame in incoming) {
                     if (frame !is Frame.Text) continue
                     val decoded = decodeClientCommand(frame.readText())
@@ -135,10 +137,11 @@ internal fun Application.installHwbpWebRoutes(
                         is HwbpClientCommand.Observe -> bindings.observe(command.params)
                         is HwbpClientCommand.Unobserve ->
                             bindings.unobserve(command.pid, command.targetAddr)
+                        is HwbpClientCommand.Config -> bindings.setBacktraceMode(command.backtraceMode)
                     }
                     send(Frame.Text(encodeAck(result)))
                     if (result.isSuccess) {
-                        hub.broadcast(encodeState(bindings.points()))
+                        hub.broadcast(encodeState(bindings.points(), bindings.backtraceMode()))
                     }
                 }
             } finally {
@@ -168,6 +171,8 @@ private fun contentTypeFor(path: String): ContentType = when {
         ContentType.Text.Html.withCharset(Charsets.UTF_8)
     path.endsWith(".js", ignoreCase = true) ->
         ContentType.Application.JavaScript.withCharset(Charsets.UTF_8)
+    path.endsWith(".css", ignoreCase = true) ->
+        ContentType.Text.CSS.withCharset(Charsets.UTF_8)
     else -> ContentType.Application.OctetStream
 }
 
@@ -224,7 +229,7 @@ internal class HwbpWebServer(
     }
 
     override suspend fun broadcastState() {
-        hub.broadcast(encodeState(bindings.points()))
+        hub.broadcast(encodeState(bindings.points(), bindings.backtraceMode()))
     }
 
     private suspend fun loadAsset(path: String): ByteArray? = withContext(Dispatchers.IO) {

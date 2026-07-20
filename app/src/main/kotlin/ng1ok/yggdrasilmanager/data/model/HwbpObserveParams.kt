@@ -6,5 +6,14 @@ data class HwbpObserveParams(
     val mode: Int,
     val len: Int,
     val flags: Int,
-    val stackSize: Int
-)
+    val stackSize: Int,
+    val lib: String? = null,
+    val offset: Long? = null,
+) {
+    val displayTarget: String
+        get() = if (!lib.isNullOrBlank() && offset != null) {
+            "$lib+0x${java.lang.Long.toUnsignedString(offset, 16)}"
+        } else {
+            "0x${java.lang.Long.toUnsignedString(targetAddr, 16)}"
+        }
+}
