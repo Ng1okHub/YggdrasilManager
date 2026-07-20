@@ -5,6 +5,7 @@ import ng1ok.yggdrasilmanager.data.model.HwbpBacktraceFrame
 
 interface YggdrasilNativeApi {
     fun checkAvailable(): Boolean
+    fun getVersion(): Long
     fun hwbpObserve(pid: Int, targetAddr: Long, mode: Int, len: Int, flags: Int, stackSize: Int): Int
     fun hwbpUnobserve(pid: Int, targetAddr: Long): Int
     fun hwbpStartListen(callback: HwbpEventCallback)
@@ -57,6 +58,7 @@ object YggdrasilNative : YggdrasilNativeApi {
     }
 
     external override fun checkAvailable(): Boolean
+    external override fun getVersion(): Long
     external override fun hwbpObserve(pid: Int, targetAddr: Long, mode: Int, len: Int, flags: Int, stackSize: Int): Int
     external override fun hwbpUnobserve(pid: Int, targetAddr: Long): Int
     external override fun hwbpStartListen(callback: HwbpEventCallback)

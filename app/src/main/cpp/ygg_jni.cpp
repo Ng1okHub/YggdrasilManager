@@ -29,6 +29,11 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_checkAvailable(JNIEnv *, jobj
     return prctl(PR_YGGDRASIL_AVAILABLE, 0, 0, 0, 0) >= 0 ? JNI_TRUE : JNI_FALSE;
 }
 
+extern "C" JNIEXPORT jlong JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_getVersion(JNIEnv *, jobject) {
+    return static_cast<jlong>(prctl(PR_YGGDRASIL_GET_VERSION, 0, 0, 0, 0));
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hwbpObserve(
         JNIEnv *, jobject, jint pid, jlong targetAddr,

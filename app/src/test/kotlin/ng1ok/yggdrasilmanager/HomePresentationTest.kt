@@ -3,6 +3,7 @@ package ng1ok.yggdrasilmanager
 import ng1ok.yggdrasilmanager.ui.home.DeviceInfo
 import ng1ok.yggdrasilmanager.ui.home.RootStatus
 import ng1ok.yggdrasilmanager.ui.home.YggdrasilStatus
+import ng1ok.yggdrasilmanager.ui.home.YggdrasilVersion
 import ng1ok.yggdrasilmanager.ui.home.androidLabel
 import ng1ok.yggdrasilmanager.ui.home.displayName
 import ng1ok.yggdrasilmanager.ui.home.label
@@ -24,5 +25,12 @@ class HomePresentationTest {
         val device = DeviceInfo("Google", "Google Pixel 8", "15", 35, "6.1", "1.0")
         assertEquals("Google Pixel 8", device.displayName)
         assertEquals("Android 15 (API 35)", device.androidLabel)
+    }
+
+    @Test
+    fun packedYggdrasilVersionIsDecodedForDisplay() {
+        assertEquals(YggdrasilVersion(1, 1, 0), YggdrasilVersion.fromPacked(0x00010100))
+        assertEquals("1.1.0", YggdrasilVersion.fromPacked(0x00010100)?.label)
+        assertEquals(null, YggdrasilVersion.fromPacked(-1))
     }
 }

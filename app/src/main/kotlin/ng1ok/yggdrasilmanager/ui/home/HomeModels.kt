@@ -26,6 +26,26 @@ val YggdrasilStatus.label: String
         YggdrasilStatus.UNAVAILABLE -> "不可用"
     }
 
+data class YggdrasilVersion(
+    val major: Int,
+    val minor: Int,
+    val patch: Int
+) {
+    val label: String
+        get() = "$major.$minor.$patch"
+
+    companion object {
+        fun fromPacked(value: Long): YggdrasilVersion? {
+            if (value < 0) return null
+            return YggdrasilVersion(
+                major = ((value shr 16) and 0xff).toInt(),
+                minor = ((value shr 8) and 0xff).toInt(),
+                patch = (value and 0xff).toInt()
+            )
+        }
+    }
+}
+
 data class DeviceInfo(
     val manufacturer: String,
     val model: String,
@@ -55,6 +75,7 @@ data class HomeUiState(
     val deviceInfo: DeviceInfo,
     val rootStatus: RootStatus = RootStatus.CHECKING,
     val yggdrasilStatus: YggdrasilStatus = YggdrasilStatus.CHECKING,
+    val yggdrasilVersion: YggdrasilVersion? = null,
     val showRootDeniedDialog: Boolean = false,
     val hasShownRootDeniedPrompt: Boolean = false
 )

@@ -52,6 +52,12 @@ class HomeViewModel(
                 val available = performStartupCheck {
                     repo.checkAvailable()
                 }
+                val version = if (available) {
+                    performStartupQuery { repo.getVersion() }
+                        ?.let(YggdrasilVersion::fromPacked)
+                } else {
+                    null
+                }
 
                 _uiState.update { state ->
                     state.copy(
@@ -59,7 +65,8 @@ class HomeViewModel(
                             YggdrasilStatus.AVAILABLE
                         } else {
                             YggdrasilStatus.UNAVAILABLE
-                        }
+                        },
+                        yggdrasilVersion = version
                     )
                 }
             }
@@ -72,6 +79,14 @@ class HomeViewModel(
         throw exception
     } catch (_: Exception) {
         false
+    }
+
+    private suspend fun <T> performStartupQuery(query: suspend () -> T): T? = try {
+        query()
+    } catch (exception: CancellationException) {
+        throw exception
+    } catch (_: Exception) {
+        null
     }
 
     fun dismissRootDeniedDialog() {

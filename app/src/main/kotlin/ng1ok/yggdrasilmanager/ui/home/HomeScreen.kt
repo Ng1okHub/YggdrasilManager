@@ -65,7 +65,10 @@ fun HomeScreen(vm: HomeViewModel = viewModel(factory = HomeViewModel.Factory)) {
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         item {
-            YggdrasilSummary(status = state.yggdrasilStatus)
+            YggdrasilSummary(
+                status = state.yggdrasilStatus,
+                version = state.yggdrasilVersion
+            )
         }
         item {
             RootSummary(status = state.rootStatus)
@@ -77,7 +80,10 @@ fun HomeScreen(vm: HomeViewModel = viewModel(factory = HomeViewModel.Factory)) {
 }
 
 @Composable
-private fun YggdrasilSummary(status: YggdrasilStatus) {
+private fun YggdrasilSummary(
+    status: YggdrasilStatus,
+    version: YggdrasilVersion?
+) {
     val containerColor = when (status) {
         YggdrasilStatus.CHECKING -> MaterialTheme.colorScheme.surfaceVariant
         YggdrasilStatus.AVAILABLE -> MaterialTheme.colorScheme.primaryContainer
@@ -119,6 +125,13 @@ private fun YggdrasilSummary(status: YggdrasilStatus) {
                     label = status.label,
                     color = contentColor
                 )
+                if (status == YggdrasilStatus.AVAILABLE) {
+                    Text(
+                        text = "版本 ${version?.label ?: "未知"}",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = contentColor
+                    )
+                }
             }
         }
     }

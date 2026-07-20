@@ -22,6 +22,7 @@ import ng1ok.yggdrasilmanager.ui.home.HomeViewModel
 import ng1ok.yggdrasilmanager.ui.home.RootStatus
 import ng1ok.yggdrasilmanager.ui.home.RootStatusSource
 import ng1ok.yggdrasilmanager.ui.home.YggdrasilStatus
+import ng1ok.yggdrasilmanager.ui.home.YggdrasilVersion
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -71,6 +72,7 @@ class HomeViewModelTest {
         val rootResult = CompletableDeferred<Boolean>()
         coEvery { rootStatusSource.isRootGranted() } coAnswers { rootResult.await() }
         coEvery { repo.checkAvailable() } returns true
+        coEvery { repo.getVersion() } returns 0x00010100
         val viewModel = createViewModel()
 
         viewModel.startStartupChecks()
@@ -78,6 +80,7 @@ class HomeViewModelTest {
 
         assertEquals(RootStatus.CHECKING, viewModel.uiState.value.rootStatus)
         assertEquals(YggdrasilStatus.AVAILABLE, viewModel.uiState.value.yggdrasilStatus)
+        assertEquals(YggdrasilVersion(1, 1, 0), viewModel.uiState.value.yggdrasilVersion)
 
         rootResult.complete(true)
         runCurrent()
@@ -89,6 +92,7 @@ class HomeViewModelTest {
     fun deniedRoot_showsPromptOnlyOnceAndDoesNotGateYggdrasil() = runTest {
         coEvery { rootStatusSource.isRootGranted() } returns false
         coEvery { repo.checkAvailable() } returns true
+        coEvery { repo.getVersion() } returns 0x00010100
         val viewModel = createViewModel()
 
         viewModel.startStartupChecks()
@@ -148,6 +152,20 @@ class HomeViewModelTest {
         assertEquals(RootStatus.CHECKING, viewModel.uiState.value.rootStatus)
         assertEquals(YggdrasilStatus.CHECKING, viewModel.uiState.value.yggdrasilStatus)
         assertFalse(viewModel.uiState.value.showRootDeniedDialog)
+    }
+
+    @Test
+    fun versionCheckFailure_doesNotMarkYggdrasilUnavailable() = runTest {
+        coEvery { rootStatusSource.isRootGranted() } returns true
+        coEvery { repo.checkAvailable() } returns true
+        coEvery { repo.getVersion() } throws IllegalStateException("version unavailable")
+        val viewModel = createViewModel()
+
+        viewModel.startStartupChecks()
+        advanceUntilIdle()
+
+        assertEquals(YggdrasilStatus.AVAILABLE, viewModel.uiState.value.yggdrasilStatus)
+        assertEquals(null, viewModel.uiState.value.yggdrasilVersion)
     }
 
     private fun createViewModel() = HomeViewModel(

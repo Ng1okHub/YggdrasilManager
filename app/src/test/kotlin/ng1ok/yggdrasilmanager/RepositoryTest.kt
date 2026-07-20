@@ -10,6 +10,7 @@ import ng1ok.yggdrasilmanager.native.YggdrasilNativeApi
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertEquals
 import org.junit.Before
 import org.junit.Test
 
@@ -33,6 +34,13 @@ class RepositoryTest {
     fun checkAvailable_returnsFalse_whenNativeReturnsFalse() = runTest {
         every { mockNative.checkAvailable() } returns false
         assertFalse(repo.checkAvailable())
+    }
+
+    @Test
+    fun getVersion_returnsPackedNativeVersion() = runTest {
+        every { mockNative.getVersion() } returns 0x00010100L
+
+        assertEquals(0x00010100L, repo.getVersion())
     }
 
     @Test

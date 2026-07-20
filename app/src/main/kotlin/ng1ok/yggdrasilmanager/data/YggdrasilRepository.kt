@@ -71,6 +71,10 @@ class YggdrasilRepository(
         native.checkAvailable()
     }
 
+    suspend fun getVersion(): Long = withContext(Dispatchers.IO) {
+        native.getVersion()
+    }
+
     suspend fun hwbpObserve(params: HwbpObserveParams): Result<Unit> = withContext(Dispatchers.IO) {
         val ret = native.hwbpObserve(
             params.pid,
