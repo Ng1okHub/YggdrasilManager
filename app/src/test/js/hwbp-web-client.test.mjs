@@ -4,8 +4,11 @@ import {
   EVENT_LIMIT,
   RECONNECT_DELAY_MS,
   DEFAULT_STACK_SIZE,
+  buildApplyConfigCommand,
   buildConfigCommand,
+  buildDeleteConfigCommand,
   buildObserveCommand,
+  buildSaveConfigCommand,
   buildUnobserveCommand,
   clearEventsModel,
   createEventCard,
@@ -19,10 +22,12 @@ test("state replaces observe points and backtrace mode", () => {
     type: "state",
     backtraceMode: "dwarf",
     points: [{ pid: 12, addr: "0x1000", mode: "RW", len: 8 }],
+    savedConfigs: [{ id: "system-lib" }],
   });
   assert.equal(next.points.length, 1);
   assert.equal(next.points[0].addr, "0x1000");
   assert.equal(next.backtraceMode, "dwarf");
+  assert.equal(next.savedConfigs[0].id, "system-lib");
 });
 
 test("events prepend, assign local displayId, and cap at 500", () => {
@@ -116,7 +121,7 @@ test("clear resets event list and display id counter", () => {
 
 test("commands normalize absolute and lib+offset targets", () => {
   assert.deepEqual(
-    buildObserveCommand({ pid: "1234", addr: "7FF0001000", mode: "RW", len: "8" }),
+    buildObserveCommand({ processKind: "pid", pid: "1234", addr: "7FF0001000", mode: "RW", len: "8" }),
     {
       type: "observe",
       pid: 1234,
@@ -130,6 +135,7 @@ test("commands normalize absolute and lib+offset targets", () => {
   assert.deepEqual(
     buildObserveCommand({
       pid: "99",
+      processKind: "pid",
       targetKind: "lib",
       lib: "libfoo.so",
       offset: "0x1234",
@@ -159,6 +165,7 @@ test("commands normalize absolute and lib+offset targets", () => {
   assert.throws(
     () => buildObserveCommand({
       pid: "99",
+      processKind: "pid",
       targetKind: "lib",
       lib: "libfoo.so",
       offset: "-1",
@@ -166,6 +173,72 @@ test("commands normalize absolute and lib+offset targets", () => {
       len: "8",
     }),
     /non-negative/,
+  );
+});
+
+test("package targets and saved configuration commands preserve reusable fields", () => {
+  assert.deepEqual(
+    buildObserveCommand({
+      packageName: "com.example.target",
+      targetKind: "lib",
+      lib: "libfoo.so",
+      offset: "0x20",
+      mode: "RW",
+      len: "8",
+      stackSize: "256",
+    }),
+    {
+      type: "observe",
+      packageName: "com.example.target",
+      mode: "RW",
+      len: 8,
+      singleThread: false,
+      stackSize: 256,
+      lib: "libfoo.so",
+      offset: "0x20",
+    },
+  );
+  assert.deepEqual(
+    buildSaveConfigCommand({
+      packageName: "com.example.target",
+      targetKind: "lib",
+      lib: "libfoo.so",
+      offset: "0x20",
+      mode: "RW",
+      len: "8",
+      stackSize: "256",
+      note: "watch entry",
+    }, "system-lib"),
+    {
+      type: "saveConfig",
+      id: "system-lib",
+      packageName: "com.example.target",
+      mode: "RW",
+      len: 8,
+      singleThread: false,
+      stackSize: 256,
+      lib: "libfoo.so",
+      offset: "0x20",
+      note: "watch entry",
+    },
+  );
+  assert.deepEqual(buildApplyConfigCommand("system-lib"), {
+    type: "applyConfig",
+    id: "system-lib",
+  });
+  assert.deepEqual(buildDeleteConfigCommand("system-lib"), {
+    type: "deleteConfig",
+    id: "system-lib",
+  });
+  assert.throws(
+    () => buildSaveConfigCommand({
+      processKind: "pid",
+      pid: "1234",
+      addr: "0x1000",
+      mode: "R",
+      len: "4",
+    }),
+    /require an app package name/,
   );
 });
 

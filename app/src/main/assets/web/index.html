@@ -187,7 +187,8 @@
       }
 
       input[type="number"],
-      input[type="text"] {
+      input[type="text"],
+      textarea {
         width: 100%;
         height: 42px;
         padding: 0 12px;
@@ -196,6 +197,13 @@
         background: rgba(2, 8, 23, 0.45);
         outline: none;
         transition: border-color .15s ease, box-shadow .15s ease;
+      }
+
+      textarea {
+        min-height: 76px;
+        height: auto;
+        padding: 10px 12px;
+        resize: vertical;
       }
 
       input:focus {
@@ -299,6 +307,41 @@
         color: var(--text-dim);
         font-size: 12px;
         line-height: 1.45;
+      }
+
+      .checkbox-row {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: var(--text-muted);
+        font-size: 12px;
+        font-weight: 650;
+        cursor: pointer;
+      }
+
+      .checkbox-row input { width: 16px; height: 16px; accent-color: var(--accent); }
+
+      .form-actions {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        gap: 8px;
+      }
+
+      .config-actions {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 6px;
+        justify-content: flex-end;
+      }
+
+      .config-actions button { min-height: 34px; padding: 0 10px; }
+
+      .config-note {
+        margin: 4px 0 0;
+        color: var(--text-dim);
+        font-size: 11px;
+        line-height: 1.45;
+        white-space: pre-wrap;
       }
 
       .points-section { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 16px; }
@@ -562,6 +605,8 @@
         .kv-grid { grid-template-columns: 1fr; }
         .event-summary { grid-template-columns: 1fr; }
         .event-meta { justify-content: flex-start; }
+        .form-actions { grid-template-columns: 1fr; }
+        .config-actions { justify-content: flex-start; }
       }
     </style>
   </head>
@@ -594,9 +639,22 @@
           </div>
           <div class="panel-body">
             <form id="observe-form">
-              <div class="field">
+              <fieldset id="process-kind-group">
+                <legend>Target process</legend>
+                <div class="segments">
+                  <label><input type="radio" name="processKind" value="package" checked>Package name</label>
+                  <label><input type="radio" name="processKind" value="pid">PID</label>
+                </div>
+              </fieldset>
+
+              <div class="field" id="package-field">
+                <label for="packageName">App package</label>
+                <input id="packageName" name="packageName" type="text" required placeholder="com.example.app" autocomplete="off" spellcheck="false">
+              </div>
+
+              <div class="field is-hidden" id="pid-field">
                 <label for="pid">Target PID</label>
-                <input id="pid" name="pid" type="number" min="1" step="1" required placeholder="e.g. 1234">
+                <input id="pid" name="pid" type="number" min="1" step="1" disabled placeholder="e.g. 1234">
               </div>
 
               <fieldset id="target-kind-group">
@@ -662,7 +720,19 @@
                 DWARF uses libunwindstack with the snapshot overlaid on process memory.
               </p>
 
-              <button class="primary-command" type="submit">Add observe point</button>
+              <label class="checkbox-row">
+                <input id="save-config" name="saveConfig" type="checkbox">
+                Save this reusable configuration
+              </label>
+              <div id="config-fields" class="field is-hidden">
+                <label for="config-note">Configuration note</label>
+                <textarea id="config-note" name="note" maxlength="2000" placeholder="What this breakpoint is for"></textarea>
+              </div>
+
+              <div class="form-actions">
+                <button id="observe-submit" class="primary-command" type="submit">Add observe point</button>
+                <button id="save-config-command" class="ghost-command" type="button">Save configuration</button>
+              </div>
               <p id="form-error" role="alert" hidden></p>
             </form>
 
@@ -672,6 +742,14 @@
                 <span class="count"><span id="point-count">0</span> total</span>
               </div>
               <div id="points"></div>
+            </section>
+
+            <section class="points-section" aria-labelledby="saved-configs-heading">
+              <div class="panel-header" style="padding: 0 0 12px; border: 0;">
+                <h2 id="saved-configs-heading">Saved configurations</h2>
+                <span class="count"><span id="saved-config-count">0</span> total</span>
+              </div>
+              <div id="saved-configs"></div>
             </section>
           </div>
         </aside>

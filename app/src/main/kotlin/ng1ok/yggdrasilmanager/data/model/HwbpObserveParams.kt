@@ -9,6 +9,8 @@ data class HwbpObserveParams(
     val stackSize: Int,
     val lib: String? = null,
     val offset: Long? = null,
+    /** The package used to resolve this runtime PID, when one was supplied. */
+    val packageName: String? = null,
 ) {
     val displayTarget: String
         get() = if (!lib.isNullOrBlank() && offset != null) {

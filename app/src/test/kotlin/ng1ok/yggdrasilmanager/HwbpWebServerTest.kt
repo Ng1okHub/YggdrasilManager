@@ -24,6 +24,7 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpClientHub
@@ -149,6 +150,54 @@ class HwbpWebServerTest {
     }
 
     @Test
+    fun savedConfigurationCommandsReturnStateWithPersistedDefinitions() = testApplication {
+        val hub = HwbpClientHub()
+        var configs = emptyList<HwbpSavedConfig>()
+        var appliedId: String? = null
+        val bindings = emptyBindings(
+            savedConfigs = { configs },
+            saveConfig = { draft ->
+                configs = listOf(draft.toSavedConfig("system-lib"))
+                Result.success(Unit)
+            },
+            applyConfig = { id ->
+                appliedId = id
+                Result.success(Unit)
+            },
+            deleteConfig = { id ->
+                configs = configs.filterNot { it.id == id }
+                Result.success(Unit)
+            },
+        )
+        application { installHwbpWebRoutes(bindings, { null }, hub) }
+        val socketClient = createClient { install(ClientWebSockets) }
+        val session = socketClient.webSocketSession("/ws")
+        receiveJson(session.incoming.receive())
+
+        session.send(
+            Frame.Text(
+                """{"type":"saveConfig","packageName":"com.example.target","lib":"libfoo.so","offset":"0x20","mode":"RW","len":8,"stackSize":256,"note":"watch entry"}"""
+            )
+        )
+        assertTrue(receiveJson(session.incoming.receive()).getValue("ok").jsonPrimitive.boolean)
+        val savedState = receiveJson(session.incoming.receive())
+        val saved = savedState.getValue("savedConfigs").jsonArray.single().jsonObject
+        assertEquals("system-lib", saved.getValue("id").jsonPrimitive.content)
+        assertEquals("watch entry", saved.getValue("note").jsonPrimitive.content)
+
+        session.send(Frame.Text("""{"type":"applyConfig","id":"system-lib"}"""))
+        assertTrue(receiveJson(session.incoming.receive()).getValue("ok").jsonPrimitive.boolean)
+        receiveJson(session.incoming.receive())
+        assertEquals("system-lib", appliedId)
+
+        session.send(Frame.Text("""{"type":"deleteConfig","id":"system-lib"}"""))
+        assertTrue(receiveJson(session.incoming.receive()).getValue("ok").jsonPrimitive.boolean)
+        val deletedState = receiveJson(session.incoming.receive())
+        assertTrue(deletedState.getValue("savedConfigs").jsonArray.isEmpty())
+        session.close()
+    }
+
+    @Test
     fun repositoryEventsAreBroadcastToEveryConnectedSession() = testApplication {
         val events = MutableSharedFlow<HwbpEvent>(extraBufferCapacity = 1)
         val hub = HwbpClientHub()
@@ -227,13 +276,23 @@ class HwbpWebServerTest {
     private fun emptyBindings(
         events: MutableSharedFlow<HwbpEvent>? = null,
         points: () -> List<HwbpObserveParams> = { emptyList() },
+        savedConfigs: () -> List<HwbpSavedConfig> = { emptyList() },
         observe: suspend (HwbpObserveParams) -> Result<Unit> = { Result.success(Unit) },
         unobserve: suspend (Int, Long) -> Result<Unit> = { _, _ -> Result.success(Unit) },
+        saveConfig: suspend (ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft) -> Result<Unit> = {
+            Result.success(Unit)
+        },
+        applyConfig: suspend (String) -> Result<Unit> = { Result.success(Unit) },
+        deleteConfig: suspend (String) -> Result<Unit> = { Result.success(Unit) },
     ) = HwbpServerBindings(
         events = events ?: emptyFlow(),
         points = points,
+        savedConfigs = savedConfigs,
         observe = observe,
         unobserve = unobserve,
+        saveConfig = saveConfig,
+        applyConfig = applyConfig,
+        deleteConfig = deleteConfig,
     )
 
     private fun receiveJson(frame: Frame) =

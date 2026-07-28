@@ -1,11 +1,13 @@
 package ng1ok.yggdrasilmanager.ui.hwbp
 
+import java.util.UUID
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -18,12 +20,19 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import ng1ok.yggdrasilmanager.App
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
+import ng1ok.yggdrasilmanager.data.hwbp.EmptyHwbpConfigStore
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigStore
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.HwbpBacktrace
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpEventEnricher
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
+import ng1ok.yggdrasilmanager.data.model.FileProcMapsSource
+import ng1ok.yggdrasilmanager.data.model.ProcMapsSource
 
 data class HwbpUiState(
     val serverRunning: Boolean = false,
@@ -31,6 +40,7 @@ data class HwbpUiState(
     val httpUrl: String? = null,
     val webSocketUrl: String? = null,
     val observePointCount: Int = 0,
+    val savedConfigCount: Int = 0,
     val backtraceMode: String = HwbpBacktrace.MODE_FP,
 )
 
@@ -39,9 +49,16 @@ fun HwbpUiState.serverStatusLabel(): String = if (serverRunning) "Running" else 
 class HwbpViewModel internal constructor(
     private val repo: YggdrasilRepository,
     serverFactory: HwbpServerFactory,
+    private val configStore: HwbpConfigStore = EmptyHwbpConfigStore,
+    private val packagePidResolver: HwbpPackagePidResolver = RootHwbpPackagePidResolver,
+    private val mapsSource: ProcMapsSource = FileProcMapsSource,
+    private val libraryTargetResolver: HwbpLibraryTargetResolver = nativeLibraryTargetResolver,
 ) : ViewModel() {
     private val _observePoints = MutableStateFlow<List<HwbpObserveParams>>(emptyList())
     val observePoints: StateFlow<List<HwbpObserveParams>> = _observePoints.asStateFlow()
+
+    private val _savedConfigs = MutableStateFlow(configStore.current)
+    val savedConfigs: StateFlow<List<HwbpSavedConfig>> = _savedConfigs.asStateFlow()
 
     private val _backtraceMode = MutableStateFlow(HwbpBacktrace.MODE_FP)
     val backtraceMode: StateFlow<String> = _backtraceMode.asStateFlow()
@@ -63,10 +80,14 @@ class HwbpViewModel internal constructor(
             HwbpServerBindings(
                 events = enrichedEvents,
                 points = { _observePoints.value },
+                savedConfigs = { _savedConfigs.value },
                 backtraceMode = { _backtraceMode.value },
                 observe = ::observe,
                 unobserve = ::unobserve,
                 setBacktraceMode = ::setBacktraceMode,
+                saveConfig = ::saveConfig,
+                applyConfig = ::applyConfig,
+                deleteConfig = ::deleteConfig,
             )
         )
         uiState = combine(
@@ -74,17 +95,22 @@ class HwbpViewModel internal constructor(
             server.connectedClients,
             server.httpUrl,
             server.webSocketUrl,
-            combine(observePoints, backtraceMode) { points, mode -> points to mode },
-        ) { running, clients, httpUrl, webSocketUrl, pointsAndMode ->
+            combine(observePoints, backtraceMode, savedConfigs) { points, mode, configs ->
+                Triple(points, mode, configs)
+            },
+        ) { running, clients, httpUrl, webSocketUrl, state ->
             HwbpUiState(
                 serverRunning = running,
                 connectedClients = clients,
                 httpUrl = httpUrl,
                 webSocketUrl = webSocketUrl,
-                observePointCount = pointsAndMode.first.size,
-                backtraceMode = pointsAndMode.second,
+                observePointCount = state.first.size,
+                savedConfigCount = state.third.size,
+                backtraceMode = state.second,
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, HwbpUiState())
+
+        configStore.loadWarning?.let { _error.value = it }
 
         viewModelScope.launch(Dispatchers.IO) {
             server.start().onFailure(::publishError)
@@ -155,8 +181,84 @@ class HwbpViewModel internal constructor(
                 .onFailure(::publishError)
         }
 
+    private suspend fun saveConfig(draft: HwbpConfigDraft): Result<Unit> {
+        val config = try {
+            draft.toSavedConfig(UUID.randomUUID().toString())
+        } catch (failure: IllegalArgumentException) {
+            return Result.failure<Unit>(failure).also { publishError(failure) }
+        }
+        return mutationMutex.withLock {
+            val updated = _savedConfigs.value.filterNot { it.id == config.id } + config
+            persistConfigs(updated)
+        }
+    }
+
+    private suspend fun deleteConfig(id: String): Result<Unit> = mutationMutex.withLock {
+        val existing = _savedConfigs.value
+        if (existing.none { it.id == id }) {
+            val failure = IllegalArgumentException("Saved configuration was not found")
+            return@withLock Result.failure<Unit>(failure).also { publishError(failure) }
+        }
+        persistConfigs(existing.filterNot { it.id == id })
+    }
+
+    private suspend fun applyConfig(id: String): Result<Unit> {
+        val config = _savedConfigs.value.firstOrNull { it.id == id }
+            ?: return Result.failure<Unit>(IllegalArgumentException("Saved configuration was not found"))
+                .also { publishError(it.exceptionOrNull()!!) }
+        val params = resolveConfig(config).getOrElse { failure ->
+            publishError(failure)
+            return Result.failure(failure)
+        }
+        return observe(params)
+    }
+
+    private suspend fun resolveConfig(config: HwbpSavedConfig): Result<HwbpObserveParams> =
+        withContext(Dispatchers.IO) {
+            try {
+                Result.success(config.resolveCurrentParams())
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (failure: Exception) {
+                Result.failure(failure)
+            }
+        }
+
+    private suspend fun persistConfigs(configs: List<HwbpSavedConfig>): Result<Unit> {
+        val result = try {
+            configStore.save(configs)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            Result.failure(failure)
+        }
+        return result
+            .onSuccess { _savedConfigs.value = configs }
+            .onFailure(::publishError)
+    }
+
+    private fun HwbpSavedConfig.resolveCurrentParams(): HwbpObserveParams {
+        val pid = packagePidResolver.resolve(packageName)
+        val targetAddress = if (!lib.isNullOrBlank() && offset != null) {
+            libraryTargetResolver.resolve(pid, lib, offset, mapsSource)
+        } else {
+            requireNotNull(targetAddr)
+        }
+        return HwbpObserveParams(
+            pid = pid,
+            targetAddr = targetAddress,
+            mode = mode,
+            len = len,
+            flags = flags,
+            stackSize = stackSize,
+            lib = lib,
+            offset = offset,
+            packageName = packageName,
+        )
+    }
+
     private fun publishError(error: Throwable) {
-        _error.value = error.message
+        _error.value = error.message ?: "HWBP operation failed"
     }
 
     override fun onCleared() {
@@ -174,6 +276,7 @@ class HwbpViewModel internal constructor(
                     serverFactory = HwbpServerFactory { bindings ->
                         HwbpWebServer(application, bindings)
                     },
+                    configStore = application.hwbpConfigStore,
                 )
             }
         }

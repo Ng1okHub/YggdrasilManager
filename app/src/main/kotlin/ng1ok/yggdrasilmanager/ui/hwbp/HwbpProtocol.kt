@@ -13,6 +13,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.FileProcMapsSource
 import ng1ok.yggdrasilmanager.data.model.HwbpBacktrace
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
@@ -31,6 +33,18 @@ internal sealed interface HwbpClientCommand {
     data class Config(
         val backtraceMode: String,
     ) : HwbpClientCommand
+
+    data class SaveConfig(
+        val config: HwbpConfigDraft,
+    ) : HwbpClientCommand
+
+    data class ApplyConfig(
+        val id: String,
+    ) : HwbpClientCommand
+
+    data class DeleteConfig(
+        val id: String,
+    ) : HwbpClientCommand
 }
 
 private val protocolJson = Json { ignoreUnknownKeys = true }
@@ -41,7 +55,7 @@ internal fun interface HwbpLibraryTargetResolver {
     fun resolve(pid: Int, library: String, offset: Long, mapsSource: ProcMapsSource): Long
 }
 
-private val nativeLibraryTargetResolver = HwbpLibraryTargetResolver { pid, library, offset, source ->
+internal val nativeLibraryTargetResolver = HwbpLibraryTargetResolver { pid, library, offset, source ->
     val mapsText = source.readMaps(pid)
         ?: throw IllegalArgumentException(
             "failed to read maps for pid=$pid " +
@@ -54,10 +68,11 @@ internal fun decodeClientCommand(
     text: String,
     mapsSource: ProcMapsSource = FileProcMapsSource,
     libraryTargetResolver: HwbpLibraryTargetResolver = nativeLibraryTargetResolver,
+    packagePidResolver: HwbpPackagePidResolver = RootHwbpPackagePidResolver,
 ): Result<HwbpClientCommand> = runCatching {
     val root = protocolJson.parseToJsonElement(text).jsonObject
     when (val type = root.requiredString("type")) {
-        "observe" -> decodeObserve(root, mapsSource, libraryTargetResolver)
+        "observe" -> decodeObserve(root, mapsSource, libraryTargetResolver, packagePidResolver)
         "unobserve" -> HwbpClientCommand.Unobserve(
             pid = root.requiredPositivePid(),
             targetAddr = root.requiredAddress("addr"),
@@ -65,6 +80,9 @@ internal fun decodeClientCommand(
         "config" -> HwbpClientCommand.Config(
             backtraceMode = HwbpBacktrace.normalizeMode(root.requiredString("backtraceMode")),
         )
+        "saveConfig" -> HwbpClientCommand.SaveConfig(decodeSavedConfig(root))
+        "applyConfig" -> HwbpClientCommand.ApplyConfig(root.requiredConfigId())
+        "deleteConfig" -> HwbpClientCommand.DeleteConfig(root.requiredConfigId())
         else -> throw IllegalArgumentException("Unknown message type: $type")
     }
 }
@@ -73,7 +91,66 @@ private fun decodeObserve(
     root: JsonObject,
     mapsSource: ProcMapsSource,
     libraryTargetResolver: HwbpLibraryTargetResolver,
+    packagePidResolver: HwbpPackagePidResolver,
 ): HwbpClientCommand.Observe {
+    val definition = decodeObserveDefinition(root)
+    val (pid, packageName) = root.resolveProcessTarget(packagePidResolver)
+
+    val (targetAddr, resolvedLib, resolvedOffset) = when {
+        definition.lib != null -> {
+            val resolved = libraryTargetResolver.resolve(
+                pid,
+                definition.lib,
+                requireNotNull(definition.offset),
+                mapsSource,
+            )
+            Triple(resolved, definition.lib, definition.offset)
+        }
+        else -> Triple(requireNotNull(definition.targetAddr), null, null)
+    }
+
+    return HwbpClientCommand.Observe(
+        HwbpObserveParams(
+            pid = pid,
+            targetAddr = targetAddr,
+            mode = definition.mode,
+            len = definition.len,
+            flags = definition.flags,
+            stackSize = definition.stackSize,
+            lib = resolvedLib,
+            offset = resolvedOffset,
+            packageName = packageName,
+        )
+    )
+}
+
+private fun decodeSavedConfig(root: JsonObject): HwbpConfigDraft {
+    val definition = decodeObserveDefinition(root)
+    return HwbpConfigDraft(
+        id = root.optionalConfigId(),
+        packageName = root.requiredPackageName(),
+        targetAddr = definition.targetAddr,
+        lib = definition.lib,
+        offset = definition.offset,
+        mode = definition.mode,
+        len = definition.len,
+        flags = definition.flags,
+        stackSize = definition.stackSize,
+        note = root["note"]?.jsonPrimitive?.contentOrNull.orEmpty(),
+    )
+}
+
+private data class HwbpObserveDefinition(
+    val targetAddr: Long?,
+    val lib: String?,
+    val offset: Long?,
+    val mode: Int,
+    val len: Int,
+    val flags: Int,
+    val stackSize: Int,
+)
+
+private fun decodeObserveDefinition(root: JsonObject): HwbpObserveDefinition {
     val modeName = root.requiredString("mode")
     val mode = requireNotNull(modeNames[modeName]) { "mode must be R, W, RW, or X" }
     val len = root["len"]?.jsonPrimitive?.intOrNull
@@ -83,30 +160,23 @@ private fun decodeObserve(
     val stackSize = root["stackSize"]?.jsonPrimitive?.intOrNull ?: DEFAULT_STACK_SIZE
     require(stackSize in 0..65536) { "stackSize must be between 0 and 65536" }
     val singleThread = root["singleThread"]?.jsonPrimitive?.booleanOrNull ?: false
-    val pid = root.requiredPositivePid()
 
     val lib = root["lib"]?.jsonPrimitive?.contentOrNull?.trim()?.takeIf { it.isNotEmpty() }
     val offset = root.parseOptionalOffset("offset")
-    val (targetAddr, resolvedLib, resolvedOffset) = when {
-        lib != null -> {
-            val off = offset ?: throw IllegalArgumentException("offset is required when lib is set")
-            val resolved = libraryTargetResolver.resolve(pid, lib, off, mapsSource)
-            Triple(resolved, lib, off)
-        }
-        else -> Triple(root.requiredAddress("addr"), null, null)
+    val targetAddr = if (lib == null) root.requiredAddress("addr") else null
+    if (lib != null) {
+        require(offset != null) { "offset is required when lib is set" }
+    } else {
+        require(offset == null) { "offset requires lib" }
     }
-
-    return HwbpClientCommand.Observe(
-        HwbpObserveParams(
-            pid = pid,
-            targetAddr = targetAddr,
-            mode = mode,
-            len = len,
-            flags = if (singleThread) 1 else 0,
-            stackSize = stackSize,
-            lib = resolvedLib,
-            offset = resolvedOffset,
-        )
+    return HwbpObserveDefinition(
+        targetAddr = targetAddr,
+        lib = lib,
+        offset = offset,
+        mode = mode,
+        len = len,
+        flags = if (singleThread) 1 else 0,
+        stackSize = stackSize,
     )
 }
 
@@ -141,6 +211,33 @@ private fun JsonObject.requiredPositivePid(): Int =
         ?: throw IllegalArgumentException("pid is required"))
         .also { require(it > 0) { "pid must be positive" } }
 
+private fun JsonObject.resolveProcessTarget(
+    packagePidResolver: HwbpPackagePidResolver,
+): Pair<Int, String?> {
+    val rawPackageName = this["packageName"]?.jsonPrimitive?.contentOrNull
+    if (rawPackageName != null) {
+        require(this["pid"] == null) { "Specify either pid or packageName, not both" }
+        val packageName = normalizePackageName(rawPackageName)
+        return packagePidResolver.resolve(packageName) to packageName
+    }
+    return requiredPositivePid() to null
+}
+
+private fun JsonObject.requiredPackageName(): String {
+    val value = this["packageName"]?.jsonPrimitive?.contentOrNull
+        ?: throw IllegalArgumentException("packageName is required")
+    return normalizePackageName(value)
+}
+
+private fun JsonObject.optionalConfigId(): String? {
+    val id = this["id"]?.jsonPrimitive?.contentOrNull?.trim() ?: return null
+    require(id.isNotEmpty() && id.length <= HwbpSavedConfig.MAX_ID_LENGTH) { "config id is invalid" }
+    return id
+}
+
+private fun JsonObject.requiredConfigId(): String =
+    optionalConfigId() ?: throw IllegalArgumentException("config id is required")
+
 private fun JsonObject.requiredAddress(name: String): Long {
     val raw = requiredString(name)
     require(raw.startsWith("0x", ignoreCase = true)) { "$name must start with 0x" }
@@ -151,6 +248,7 @@ private fun JsonObject.requiredAddress(name: String): Long {
 internal fun encodeState(
     points: List<HwbpObserveParams>,
     backtraceMode: String = HwbpBacktrace.MODE_FP,
+    savedConfigs: List<HwbpSavedConfig> = emptyList(),
 ): String = buildJsonObject {
     put("type", "state")
     put("backtraceMode", HwbpBacktrace.normalizeMode(backtraceMode))
@@ -167,10 +265,34 @@ internal fun encodeState(
                 put("len", point.len)
                 put("flags", point.flags)
                 put("stackSize", point.stackSize)
+                if (!point.packageName.isNullOrBlank()) {
+                    put("packageName", point.packageName)
+                }
                 if (!point.lib.isNullOrBlank() && point.offset != null) {
                     put("lib", point.lib)
                     put("offset", point.offset.toHexAddress())
                     put("display", point.displayTarget)
+                }
+            })
+        }
+    })
+    put("savedConfigs", buildJsonArray {
+        savedConfigs.forEach { config ->
+            add(buildJsonObject {
+                put("id", config.id)
+                put("packageName", config.packageName)
+                put("mode", modeNames.entries.singleOrNull { it.value == config.mode }?.key ?: config.mode.toString())
+                put("len", config.len)
+                put("flags", config.flags)
+                put("stackSize", config.stackSize)
+                put("note", config.note)
+                if (!config.lib.isNullOrBlank() && config.offset != null) {
+                    put("lib", config.lib)
+                    put("offset", config.offset.toHexAddress())
+                    put("display", config.displayTarget)
+                } else {
+                    put("addr", requireNotNull(config.targetAddr).toHexAddress())
+                    put("display", config.displayTarget)
                 }
             })
         }

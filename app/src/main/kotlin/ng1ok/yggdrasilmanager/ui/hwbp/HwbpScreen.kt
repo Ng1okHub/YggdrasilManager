@@ -81,6 +81,7 @@ fun HwbpScreen(vm: HwbpViewModel = viewModel(factory = HwbpViewModel.Factory)) {
         HorizontalDivider(modifier = Modifier.padding(top = 8.dp))
         MetricRow("Connected PC clients", uiState.connectedClients)
         MetricRow("Active observe points", uiState.observePointCount)
+        MetricRow("Saved configurations", uiState.savedConfigCount)
         TextMetricRow("Backtrace mode", uiState.backtraceMode)
 
         Spacer(modifier = Modifier.height(16.dp))

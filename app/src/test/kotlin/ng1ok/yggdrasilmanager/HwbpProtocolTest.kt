@@ -6,6 +6,7 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.HwbpBacktraceFrame
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
@@ -13,6 +14,7 @@ import ng1ok.yggdrasilmanager.data.model.ProcMaps
 import ng1ok.yggdrasilmanager.data.model.ProcMapsSource
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpClientCommand
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpLibraryTargetResolver
+import ng1ok.yggdrasilmanager.ui.hwbp.HwbpPackagePidResolver
 import ng1ok.yggdrasilmanager.ui.hwbp.decodeClientCommand
 import ng1ok.yggdrasilmanager.ui.hwbp.encodeAck
 import ng1ok.yggdrasilmanager.ui.hwbp.encodeEvent
@@ -65,6 +67,38 @@ class HwbpProtocolTest {
         assertEquals(0x7a00000234L, command.params.targetAddr)
         assertEquals("libfoo.so", command.params.lib)
         assertEquals(0x1234L, command.params.offset)
+    }
+
+    @Test
+    fun observeCommandResolvesPackageNameToTheCurrentPid() {
+        val packageResolver = HwbpPackagePidResolver { packageName ->
+            assertEquals("com.example.target", packageName)
+            321
+        }
+        val result = decodeClientCommand(
+            """{"type":"observe","packageName":"com.example.target","addr":"0x1000","mode":"R","len":4}""",
+            packagePidResolver = packageResolver,
+        )
+
+        val command = result.getOrThrow() as HwbpClientCommand.Observe
+
+        assertEquals(321, command.params.pid)
+        assertEquals("com.example.target", command.params.packageName)
+    }
+
+    @Test
+    fun savedConfigCommandRequiresPackageAndRetainsReusableDefinition() {
+        val result = decodeClientCommand(
+            """{"type":"saveConfig","id":"system-lib","packageName":"com.example.target","lib":"libfoo.so","offset":"0x20","mode":"RW","len":8,"stackSize":256,"note":"watch entry"}"""
+        )
+
+        val command = result.getOrThrow() as HwbpClientCommand.SaveConfig
+
+        assertEquals("system-lib", command.config.id)
+        assertEquals("com.example.target", command.config.packageName)
+        assertEquals("libfoo.so", command.config.lib)
+        assertEquals(0x20L, command.config.offset)
+        assertEquals("watch entry", command.config.note)
     }
 
     @Test
@@ -124,6 +158,19 @@ class HwbpProtocolTest {
             encodeState(
                 listOf(HwbpObserveParams(12, 0x1000, 3, 8, 1, 256, "libfoo.so", 0x10)),
                 backtraceMode = "dwarf",
+                savedConfigs = listOf(
+                    HwbpSavedConfig(
+                        id = "config-1",
+                        packageName = "com.example.target",
+                        lib = "libfoo.so",
+                        offset = 0x20,
+                        mode = 3,
+                        len = 8,
+                        flags = 1,
+                        stackSize = 256,
+                        note = "watch entry",
+                    )
+                ),
             )
         ).jsonObject
         val point = root.getValue("points").jsonArray.single().jsonObject
@@ -138,6 +185,10 @@ class HwbpProtocolTest {
         assertEquals(256, point.getValue("stackSize").jsonPrimitive.int)
         assertEquals("libfoo.so", point.getValue("lib").jsonPrimitive.content)
         assertEquals("0x10", point.getValue("offset").jsonPrimitive.content)
+        val savedConfig = root.getValue("savedConfigs").jsonArray.single().jsonObject
+        assertEquals("config-1", savedConfig.getValue("id").jsonPrimitive.content)
+        assertEquals("com.example.target", savedConfig.getValue("packageName").jsonPrimitive.content)
+        assertEquals("watch entry", savedConfig.getValue("note").jsonPrimitive.content)
     }
 
     @Test

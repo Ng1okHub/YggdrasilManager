@@ -12,6 +12,8 @@ import ng1ok.yggdrasilmanager.data.hidedbg.HideDbgMutationCoordinator
 import ng1ok.yggdrasilmanager.data.hidedbg.InstalledAppsSource
 import ng1ok.yggdrasilmanager.data.hidedbg.PackageManagerInstalledAppsSource
 import ng1ok.yggdrasilmanager.data.hidedbg.SharedPreferencesHideDbgConfigStore
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigStore
+import ng1ok.yggdrasilmanager.data.hwbp.SharedPreferencesHwbpConfigStore
 
 class App : Application() {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
@@ -23,6 +25,9 @@ class App : Application() {
         private set
 
     lateinit var installedAppsSource: InstalledAppsSource
+        private set
+
+    lateinit var hwbpConfigStore: HwbpConfigStore
         private set
 
     override fun onCreate() {
@@ -40,6 +45,12 @@ class App : Application() {
             applicationScope = applicationScope
         )
         installedAppsSource = PackageManagerInstalledAppsSource(packageManager)
+        hwbpConfigStore = SharedPreferencesHwbpConfigStore(
+            getSharedPreferences(
+                SharedPreferencesHwbpConfigStore.FILE_NAME,
+                Context.MODE_PRIVATE
+            )
+        )
         Shell.enableVerboseLogging = BuildConfig.DEBUG
         Shell.setDefaultBuilder(
             Shell.Builder.create()

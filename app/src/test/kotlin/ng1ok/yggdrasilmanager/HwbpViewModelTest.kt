@@ -17,12 +17,17 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigStore
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpServer
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpServerBindings
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpServerFactory
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpViewModel
+import ng1ok.yggdrasilmanager.ui.hwbp.HwbpLibraryTargetResolver
+import ng1ok.yggdrasilmanager.ui.hwbp.HwbpPackagePidResolver
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -37,6 +42,7 @@ class HwbpViewModelTest {
     private lateinit var server: FakeHwbpServer
     private lateinit var bindings: HwbpServerBindings
     private lateinit var viewModel: HwbpViewModel
+    private lateinit var configStore: FakeHwbpConfigStore
 
     @Before
     fun setup() {
@@ -44,12 +50,16 @@ class HwbpViewModelTest {
         repo = mockk(relaxed = true)
         every { repo.hwbpEvents } returns MutableSharedFlow<HwbpEvent>()
         server = FakeHwbpServer()
+        configStore = FakeHwbpConfigStore()
         viewModel = HwbpViewModel(
             repo = repo,
             serverFactory = HwbpServerFactory { captured ->
                 bindings = captured
                 server
             },
+            configStore = configStore,
+            packagePidResolver = HwbpPackagePidResolver { 4321 },
+            libraryTargetResolver = HwbpLibraryTargetResolver { _, _, offset, _ -> 0x7a00000000L + offset },
         )
     }
 
@@ -130,6 +140,44 @@ class HwbpViewModelTest {
     }
 
     @Test
+    fun savedConfigCanBeCreatedUpdatedAndDeletedThroughServerBindings() = runTest {
+        val first = savedConfigDraft(note = "first")
+
+        assertTrue(bindings.saveConfig(first).isSuccess)
+        assertEquals("first", viewModel.savedConfigs.value.single().note)
+        assertEquals(viewModel.savedConfigs.value, configStore.current)
+
+        assertTrue(bindings.saveConfig(first.copy(note = "updated")).isSuccess)
+        assertEquals("updated", viewModel.savedConfigs.value.single().note)
+
+        assertTrue(bindings.deleteConfig("system-lib").isSuccess)
+        assertTrue(viewModel.savedConfigs.value.isEmpty())
+    }
+
+    @Test
+    fun applyingSavedConfigResolvesFreshPidAndLibraryAddress() = runTest {
+        val draft = savedConfigDraft()
+        assertTrue(bindings.saveConfig(draft).isSuccess)
+        val expected = HwbpObserveParams(
+            pid = 4321,
+            targetAddr = 0x7a00000020L,
+            mode = 3,
+            len = 8,
+            flags = 1,
+            stackSize = 256,
+            lib = "libfoo.so",
+            offset = 0x20,
+            packageName = "com.example.target",
+        )
+        coEvery { repo.hwbpObserve(expected) } returns Result.success(Unit)
+
+        val result = bindings.applyConfig("system-lib")
+
+        assertTrue(result.isSuccess)
+        assertEquals(listOf(expected), viewModel.observePoints.value)
+    }
+
+    @Test
     fun toggleStopsAndRestartsTheServer() = runTest {
         waitUntil { server.startCount == 1 }
 
@@ -183,6 +231,31 @@ class HwbpViewModelTest {
         address: Long,
         mode: Int = 1,
     ) = HwbpObserveParams(pid, address, mode, 4, 0, 256)
+
+    private fun savedConfigDraft(note: String = "watch entry") = HwbpConfigDraft(
+        id = "system-lib",
+        packageName = "com.example.target",
+        lib = "libfoo.so",
+        offset = 0x20,
+        mode = 3,
+        len = 8,
+        flags = 1,
+        stackSize = 256,
+        note = note,
+    )
+}
+
+private class FakeHwbpConfigStore(
+    initial: List<HwbpSavedConfig> = emptyList(),
+) : HwbpConfigStore {
+    override var current: List<HwbpSavedConfig> = initial
+        private set
+    override val loadWarning: String? = null
+
+    override suspend fun save(configs: List<HwbpSavedConfig>): Result<Unit> {
+        current = configs
+        return Result.success(Unit)
+    }
 }
 
 private class FakeHwbpServer : HwbpServer {

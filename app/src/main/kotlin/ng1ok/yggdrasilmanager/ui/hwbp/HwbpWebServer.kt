@@ -36,6 +36,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
+import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
 
@@ -44,10 +46,20 @@ internal const val HWBP_SERVER_PORT = 8765
 internal data class HwbpServerBindings(
     val events: Flow<HwbpEvent>,
     val points: () -> List<HwbpObserveParams>,
+    val savedConfigs: () -> List<HwbpSavedConfig> = { emptyList() },
     val backtraceMode: () -> String = { "fp" },
     val observe: suspend (HwbpObserveParams) -> Result<Unit>,
     val unobserve: suspend (Int, Long) -> Result<Unit>,
     val setBacktraceMode: (String) -> Result<Unit> = { Result.success(Unit) },
+    val saveConfig: suspend (HwbpConfigDraft) -> Result<Unit> = {
+        Result.failure(UnsupportedOperationException("Saved configurations are unavailable"))
+    },
+    val applyConfig: suspend (String) -> Result<Unit> = {
+        Result.failure(UnsupportedOperationException("Saved configurations are unavailable"))
+    },
+    val deleteConfig: suspend (String) -> Result<Unit> = {
+        Result.failure(UnsupportedOperationException("Saved configurations are unavailable"))
+    },
 )
 
 internal interface HwbpServer {
@@ -124,7 +136,15 @@ internal fun Application.installHwbpWebRoutes(
         webSocket("/ws") {
             hub.add(this)
             try {
-                send(Frame.Text(encodeState(bindings.points(), bindings.backtraceMode())))
+                send(
+                    Frame.Text(
+                        encodeState(
+                            bindings.points(),
+                            bindings.backtraceMode(),
+                            bindings.savedConfigs(),
+                        )
+                    )
+                )
                 for (frame in incoming) {
                     if (frame !is Frame.Text) continue
                     val decoded = decodeClientCommand(frame.readText())
@@ -138,10 +158,19 @@ internal fun Application.installHwbpWebRoutes(
                         is HwbpClientCommand.Unobserve ->
                             bindings.unobserve(command.pid, command.targetAddr)
                         is HwbpClientCommand.Config -> bindings.setBacktraceMode(command.backtraceMode)
+                        is HwbpClientCommand.SaveConfig -> bindings.saveConfig(command.config)
+                        is HwbpClientCommand.ApplyConfig -> bindings.applyConfig(command.id)
+                        is HwbpClientCommand.DeleteConfig -> bindings.deleteConfig(command.id)
                     }
                     send(Frame.Text(encodeAck(result)))
                     if (result.isSuccess) {
-                        hub.broadcast(encodeState(bindings.points(), bindings.backtraceMode()))
+                        hub.broadcast(
+                            encodeState(
+                                bindings.points(),
+                                bindings.backtraceMode(),
+                                bindings.savedConfigs(),
+                            )
+                        )
                     }
                 }
             } finally {
@@ -229,7 +258,9 @@ internal class HwbpWebServer(
     }
 
     override suspend fun broadcastState() {
-        hub.broadcast(encodeState(bindings.points(), bindings.backtraceMode()))
+        hub.broadcast(
+            encodeState(bindings.points(), bindings.backtraceMode(), bindings.savedConfigs())
+        )
     }
 
     private suspend fun loadAsset(path: String): ByteArray? = withContext(Dispatchers.IO) {
