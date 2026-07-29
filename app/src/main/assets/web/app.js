@@ -577,7 +577,7 @@ function startBrowserClient(document, window) {
         const metadata = document.createElement("span");
         const display = config.display ||
           (config.lib && config.offset ? `${config.lib}+${config.offset}` : config.addr);
-        metadata.textContent = `${display || "-"} 路 ${config.mode}/${config.len}B 路 stack ${config.stackSize ?? "-"}`;
+        metadata.textContent = `${display || "-"} | ${config.mode}/${config.len}B | stack ${config.stackSize ?? "-"}`;
         description.append(title, metadata);
         if (config.note) {
           const note = document.createElement("p");

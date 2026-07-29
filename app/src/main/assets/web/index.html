@@ -337,11 +337,27 @@
       .config-actions button { min-height: 34px; padding: 0 10px; }
 
       .config-note {
-        margin: 4px 0 0;
-        color: var(--text-dim);
-        font-size: 11px;
-        line-height: 1.45;
+        margin: 9px 0 0;
+        padding: 8px 10px;
+        border-left: 3px solid var(--accent);
+        background: rgba(56, 189, 248, 0.08);
+        color: #dbeafe;
+        font-size: 12px;
+        font-weight: 500;
+        line-height: 1.5;
         white-space: pre-wrap;
+        overflow-wrap: anywhere;
+        word-break: break-word;
+      }
+
+      .config-note::before {
+        content: "NOTE";
+        display: block;
+        margin-bottom: 4px;
+        color: var(--accent);
+        font-size: 10px;
+        font-weight: 700;
+        letter-spacing: 0.06em;
       }
 
       .points-section { margin-top: 18px; border-top: 1px solid var(--border); padding-top: 16px; }
@@ -359,10 +375,13 @@
 
       .point-row + .point-row { margin-top: 10px; }
 
+      .point-row > * { min-width: 0; }
+
       .point-row strong {
         display: block;
         font-size: 13px;
         margin-bottom: 4px;
+        overflow-wrap: anywhere;
       }
 
       .point-row span {
