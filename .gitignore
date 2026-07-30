@@ -16,3 +16,4 @@
 local.properties
 /.worktrees/
 app/src/main/cpp/third_party/**/cmake_install.cmake
+.agents
