@@ -51,6 +51,7 @@ class HwbpWebServerTest {
         val assets = mapOf(
             "index.html" to "<main>HWBP</main>".encodeToByteArray(),
             "app.js" to "export {};".encodeToByteArray(),
+            "styles.css" to "body { color: green; }".encodeToByteArray(),
         )
         application {
             installHwbpWebRoutes(
@@ -62,12 +63,16 @@ class HwbpWebServerTest {
 
         val root = client.get("/")
         val script = client.get("/static/app.js")
+        val stylesheet = client.get("/static/styles.css")
 
         assertEquals(HttpStatusCode.OK, root.status)
         assertEquals("<main>HWBP</main>", root.bodyAsText())
         assertEquals("text/html; charset=UTF-8", root.headers["Content-Type"])
         assertEquals(HttpStatusCode.OK, script.status)
         assertEquals("application/javascript; charset=UTF-8", script.headers["Content-Type"])
+        assertEquals(HttpStatusCode.OK, stylesheet.status)
+        assertEquals("body { color: green; }", stylesheet.bodyAsText())
+        assertEquals("text/css; charset=UTF-8", stylesheet.headers["Content-Type"])
         assertEquals(HttpStatusCode.NotFound, client.get("/static/missing.js").status)
         assertEquals(HttpStatusCode.BadRequest, client.get("/static/%2e%2e").status)
     }

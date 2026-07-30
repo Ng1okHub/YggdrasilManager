@@ -122,23 +122,26 @@ test("backtrace copy falls back to a text selection on HTTP clipboard failures",
   assert.equal(document.copiedText, formatBacktrace(event));
 });
 
-test("event cards build and discard details body as they toggle", () => {
+test("event cards keep copy controls outside the disclosure and discard details bodies", () => {
   const document = new FakeDocument();
   const card = createEventCard(document, browserEvent(1));
 
   assert.equal(card.open, false);
-  assert.equal(card.childElementCount, 1);
-  assert.equal(card.firstElementChild.lastElementChild.lastElementChild.textContent, "Copy stack");
+  assert.equal(card.childElementCount, 2);
+  assert.equal(card.firstElementChild.tagName, "SUMMARY");
+  assert.equal(card.children[1].className, "event-tools");
+  assert.equal(card.children[1].lastElementChild.tagName, "BUTTON");
+  assert.equal(card.children[1].lastElementChild.textContent, "Copy stack");
 
   card.open = true;
   card.dispatchEvent({ type: "toggle" });
   const firstBody = card.lastElementChild;
   assert.equal(firstBody.className, "event-body");
-  assert.equal(card.childElementCount, 2);
+  assert.equal(card.childElementCount, 3);
 
   card.open = false;
   card.dispatchEvent({ type: "toggle" });
-  assert.equal(card.childElementCount, 1);
+  assert.equal(card.childElementCount, 2);
 
   card.open = true;
   card.dispatchEvent({ type: "toggle" });
@@ -152,7 +155,7 @@ test("incremental event cards preserve manual state and only keep the newest aut
   const second = prependEventCard(document, container, browserEvent(2));
 
   assert.equal(first.open, false);
-  assert.equal(first.childElementCount, 1);
+  assert.equal(first.childElementCount, 2);
   assert.equal(second.open, true);
 
   const secondSummary = second.firstElementChild;

@@ -325,9 +325,13 @@ export function createEventCard(
     dropped.textContent = `dropped ${event.dropped}`;
     meta.append(dropped);
   }
-  meta.append(createCopyBacktraceButton(document, event));
-  summary.append(left, meta);
-  details.append(summary);
+  const tools = document.createElement("div");
+  tools.className = "event-tools";
+  tools.setAttribute("role", "group");
+  tools.setAttribute("aria-label", "Hit actions");
+  tools.append(meta, createCopyBacktraceButton(document, event));
+  summary.append(left);
+  details.append(summary, tools);
 
   let body = null;
   const syncBody = () => {
@@ -512,6 +516,7 @@ function startBrowserClient(document, window) {
   let pendingBacktraceMode = null;
   let pendingObserveAfterConfig = null;
   let editingConfigId = null;
+  let eventRenderFrame = null;
 
   function setConnectionState(state) {
     connectionState.dataset.state = state;
@@ -623,7 +628,7 @@ function startBrowserClient(document, window) {
         const metadata = document.createElement("span");
         const display = point.display ||
           (point.lib && point.offset ? `${point.lib}+${point.offset}` : point.addr);
-        metadata.textContent = `${display} · ${point.mode}/${point.len}B · stack ${point.stackSize ?? "-"}`;
+        metadata.textContent = `${display} | ${point.mode}/${point.len}B | stack ${point.stackSize ?? "-"}`;
         if (point.lib && point.addr) {
           const resolved = document.createElement("span");
           resolved.textContent = `resolved ${point.addr}`;
@@ -685,8 +690,9 @@ function startBrowserClient(document, window) {
     } else {
       model.savedConfigs.forEach((config) => {
         const row = document.createElement("div");
-        row.className = "point-row";
+        row.className = "point-row saved-config-row";
         const description = document.createElement("div");
+        description.className = "saved-config-summary";
         const title = document.createElement("strong");
         title.textContent = config.packageName || "Unknown package";
         const metadata = document.createElement("span");
@@ -703,10 +709,14 @@ function startBrowserClient(document, window) {
 
         const actions = document.createElement("div");
         actions.className = "config-actions";
+        const configLabel = config.packageName || "saved configuration";
+        actions.setAttribute("role", "group");
+        actions.setAttribute("aria-label", `Actions for ${configLabel}`);
         const apply = document.createElement("button");
         apply.type = "button";
-        apply.className = "ghost-command";
+        apply.className = "primary-command config-apply-command";
         apply.textContent = "Apply";
+        apply.setAttribute("aria-label", `Apply ${configLabel}`);
         apply.addEventListener("click", () => {
           try {
             sendCommand(buildApplyConfigCommand(config.id));
@@ -718,11 +728,13 @@ function startBrowserClient(document, window) {
         edit.type = "button";
         edit.className = "ghost-command";
         edit.textContent = "Edit";
+        edit.setAttribute("aria-label", `Edit ${configLabel}`);
         edit.addEventListener("click", () => editSavedConfig(config));
         const remove = document.createElement("button");
         remove.type = "button";
         remove.className = "remove-command";
         remove.textContent = "Delete";
+        remove.setAttribute("aria-label", `Delete ${configLabel}`);
         remove.addEventListener("click", () => {
           if (typeof window.confirm === "function" && !window.confirm("Delete this saved configuration?")) {
             return;
@@ -747,7 +759,7 @@ function startBrowserClient(document, window) {
     const fragment = document.createDocumentFragment();
 
     if (visible.length === 0) {
-      fragment.append(createEmptyState(document, "Waiting for breakpoint hits…"));
+      fragment.append(createEmptyState(document, "Waiting for breakpoint hits..."));
     } else {
       visible.forEach((event, index) => {
         fragment.append(
@@ -757,6 +769,17 @@ function startBrowserClient(document, window) {
     }
 
     events.replaceChildren(fragment);
+  }
+
+  function scheduleEventRender() {
+    if (eventRenderFrame !== null) return;
+    const render = () => {
+      eventRenderFrame = null;
+      renderEvents();
+    };
+    eventRenderFrame = typeof window.requestAnimationFrame === "function"
+      ? window.requestAnimationFrame(render)
+      : window.setTimeout(render, 0);
   }
 
   function prependNewestEvent(event) {
@@ -806,7 +829,7 @@ function startBrowserClient(document, window) {
     }
     if (message.type === "event") {
       if (model.deduplicateStacks) {
-        renderEvents();
+        scheduleEventRender();
       } else {
         prependNewestEvent(model.events[0]);
       }
