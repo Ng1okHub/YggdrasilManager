@@ -1,6 +1,8 @@
 package ng1ok.yggdrasilmanager.ui.hwbp
 
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.locks.ReentrantLock
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
@@ -21,6 +23,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlin.concurrent.withLock
 import ng1ok.yggdrasilmanager.App
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
 import ng1ok.yggdrasilmanager.data.hwbp.EmptyHwbpConfigStore
@@ -67,12 +70,13 @@ class HwbpViewModel internal constructor(
     val error: StateFlow<String?> = _error.asStateFlow()
 
     private val mutationMutex = Mutex()
+    private val serverLock = ReentrantLock()
+    private val cleared = AtomicBoolean(false)
     private val server: HwbpServer
 
     val uiState: StateFlow<HwbpUiState>
 
     init {
-        repo.startEventStream()
         val enrichedEvents = repo.hwbpEvents.map { event ->
             enrichEvent(event)
         }.flowOn(Dispatchers.IO)
@@ -112,8 +116,17 @@ class HwbpViewModel internal constructor(
 
         configStore.loadWarning?.let { _error.value = it }
 
+        // HWBPs remain installed after this destination is removed.  Keep the
+        // process-wide reader alive as well, otherwise a hit that arrives after
+        // navigation away is left unread in the kernel event queue.
+        repo.startEventStream()
+
         viewModelScope.launch(Dispatchers.IO) {
-            server.start().onFailure(::publishError)
+            serverLock.withLock {
+                if (!cleared.get()) {
+                    startServer()
+                }
+            }
         }
     }
 
@@ -135,10 +148,13 @@ class HwbpViewModel internal constructor(
 
     fun toggleServer() {
         viewModelScope.launch(Dispatchers.IO) {
-            if (server.running.value) {
-                server.stop()
-            } else {
-                server.start().onFailure(::publishError)
+            serverLock.withLock {
+                if (cleared.get()) return@withLock
+                if (server.running.value) {
+                    stopServer()
+                } else {
+                    startServer()
+                }
             }
         }
     }
@@ -152,12 +168,32 @@ class HwbpViewModel internal constructor(
         return Result.success(Unit)
     }
 
-    private fun enrichEvent(event: HwbpEvent): HwbpEvent =
-        HwbpEventEnricher.enrich(
-            event = event,
-            mode = _backtraceMode.value,
-            native = repo.nativeApi,
-        )
+    private fun enrichEvent(event: HwbpEvent): HwbpEvent {
+        return try {
+            HwbpEventEnricher.enrich(
+                event = event,
+                mode = _backtraceMode.value,
+                native = repo.nativeApi,
+            )
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (error: Exception) {
+            event.copy(
+                backtraceMode = HwbpBacktrace.normalizeMode(_backtraceMode.value),
+                backtraceNote = "backtrace failed: ${error.message ?: error.javaClass.simpleName}",
+            )
+        }
+    }
+
+    private fun startServer() {
+        if (server.running.value) return
+        server.start()
+            .onFailure(::publishError)
+    }
+
+    private fun stopServer() {
+        server.stop()
+    }
 
     private suspend fun observe(params: HwbpObserveParams): Result<Unit> =
         mutationMutex.withLock {
@@ -262,8 +298,10 @@ class HwbpViewModel internal constructor(
     }
 
     override fun onCleared() {
-        server.stop()
-        repo.stopEventStream()
+        cleared.set(true)
+        serverLock.withLock {
+            stopServer()
+        }
         super.onCleared()
     }
 

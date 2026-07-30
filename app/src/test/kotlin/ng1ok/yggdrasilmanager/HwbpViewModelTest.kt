@@ -184,10 +184,12 @@ class HwbpViewModelTest {
         viewModel.toggleServer()
         waitUntil { server.stopCount == 1 }
         assertFalse(server.running.value)
+        verify(exactly = 0) { repo.stopEventStream() }
 
         viewModel.toggleServer()
         waitUntil { server.startCount == 2 }
         assertTrue(server.running.value)
+        verify(exactly = 1) { repo.startEventStream() }
     }
 
     @Test
@@ -209,7 +211,7 @@ class HwbpViewModelTest {
     }
 
     @Test
-    fun clearingViewModelStopsServerAndNativeStream() = runTest {
+    fun clearingViewModelStopsServerButKeepsNativeStreamAlive() = runTest {
         waitUntil { server.startCount == 1 }
         val store = ViewModelStore()
         store.put("hwbp", viewModel)
@@ -217,7 +219,7 @@ class HwbpViewModelTest {
         store.clear()
 
         assertEquals(1, server.stopCount)
-        verify(exactly = 1) { repo.stopEventStream() }
+        verify(exactly = 0) { repo.stopEventStream() }
     }
 
     private suspend fun waitUntil(predicate: () -> Boolean) {

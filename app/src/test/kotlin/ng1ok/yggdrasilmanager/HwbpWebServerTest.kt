@@ -13,9 +13,11 @@ import io.ktor.websocket.Frame
 import io.ktor.websocket.close
 import io.ktor.websocket.readText
 import io.ktor.websocket.send
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
@@ -31,6 +33,7 @@ import ng1ok.yggdrasilmanager.ui.hwbp.HwbpClientHub
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpServerBindings
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpWebServer
 import ng1ok.yggdrasilmanager.ui.hwbp.installHwbpWebRoutes
+import io.mockk.coEvery
 import io.mockk.every
 import io.mockk.mockk
 import io.mockk.verify
@@ -226,6 +229,18 @@ class HwbpWebServerTest {
 
         first.close()
         second.close()
+    }
+
+    @Test
+    fun cancelledClientDoesNotCancelAnActiveBroadcast() = runTest {
+        val hub = HwbpClientHub()
+        val cancelledSession = mockk<io.ktor.server.websocket.DefaultWebSocketServerSession>()
+        coEvery { cancelledSession.send(any<Frame>()) } throws CancellationException("closed")
+        hub.add(cancelledSession)
+
+        hub.broadcast("event")
+
+        assertEquals(0, hub.connectedClients.value)
     }
 
     @Test

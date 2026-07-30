@@ -18,6 +18,7 @@ static jobject g_callback_ref = nullptr;
 static jmethodID g_on_event_mid = nullptr;
 static pthread_t g_listen_thread = 0;
 static std::atomic<bool> g_stop{false};
+static pthread_mutex_t g_listen_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
     g_jvm = vm;
@@ -79,7 +80,9 @@ struct EventRecord {
 
 static void *listen_thread(void *) {
     JNIEnv *env = nullptr;
-    g_jvm->AttachCurrentThread(&env, nullptr);
+    if (!g_jvm || g_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) {
+        return nullptr;
+    }
 
     if (!g_on_event_mid) {
         g_jvm->DetachCurrentThread();
@@ -96,22 +99,58 @@ static void *listen_thread(void *) {
         memset(&rec, 0, sizeof(rec));
         long ret = prctl(PR_YGGDRASIL_HWBP_READ_EVENT, &req, 0, 0, 0);
         if (ret < 0) {
-            if (errno == EAGAIN) { nanosleep(&delay, nullptr); continue; }
-            break;
+            if (errno == EAGAIN) {
+                nanosleep(&delay, nullptr);
+                continue;
+            }
+            if (errno == EINTR) continue;
+            nanosleep(&delay, nullptr);
+            continue;
         }
         const struct ygg_hwbp_event_header *h = &rec.header;
-        if ((uint32_t)ret < sizeof(*h) || h->magic != YGG_HWBP_EVENT_MAGIC) continue;
+        if ((uint32_t)ret < sizeof(*h) ||
+            h->magic != YGG_HWBP_EVENT_MAGIC ||
+            h->total_size != (uint32_t)ret) {
+            continue;
+        }
 
-        jstring comm = env->NewStringUTF(h->comm);
-        if (!comm) { env->ExceptionClear(); continue; }
+        const size_t comm_len = strnlen(h->comm, sizeof(h->comm));
+        const std::string comm_text(h->comm, comm_len);
+        jstring comm = env->NewStringUTF(comm_text.c_str());
+        if (!comm) {
+            env->ExceptionClear();
+            comm = env->NewStringUTF("<invalid comm>");
+        }
+        if (!comm) {
+            env->ExceptionClear();
+            continue;
+        }
+
         jlongArray regs = env->NewLongArray(31);
-        if (!regs) { env->DeleteLocalRef(comm); env->ExceptionClear(); continue; }
-        env->SetLongArrayRegion(regs, 0, 31, (const jlong *)h->regs.regs);
+        if (regs) {
+            env->SetLongArrayRegion(regs, 0, 31, (const jlong *)h->regs.regs);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+            }
+        } else {
+            env->ExceptionClear();
+            regs = env->NewLongArray(0);
+        }
+        if (!regs) {
+            env->DeleteLocalRef(comm);
+            env->ExceptionClear();
+            continue;
+        }
 
         uint32_t stack_len = h->stack_copied_size;
         if (stack_len > YGG_HWBP_EVENT_STACK_MAX) stack_len = YGG_HWBP_EVENT_STACK_MAX;
         if (!(h->flags & YGG_HWBP_EVENT_FLAG_STACK)) stack_len = 0;
         jbyteArray stack = env->NewByteArray((jsize)stack_len);
+        if (!stack) {
+            env->ExceptionClear();
+            stack_len = 0;
+            stack = env->NewByteArray(0);
+        }
         if (!stack) {
             env->DeleteLocalRef(comm);
             env->DeleteLocalRef(regs);
@@ -120,6 +159,18 @@ static void *listen_thread(void *) {
         }
         if (stack_len > 0) {
             env->SetByteArrayRegion(stack, 0, (jsize)stack_len, (const jbyte *)rec.stack);
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                env->DeleteLocalRef(stack);
+                stack_len = 0;
+                stack = env->NewByteArray(0);
+                if (!stack) {
+                    env->DeleteLocalRef(comm);
+                    env->DeleteLocalRef(regs);
+                    env->ExceptionClear();
+                    continue;
+                }
+            }
         }
 
         env->CallVoidMethod(g_callback_ref, g_on_event_mid,
@@ -149,22 +200,41 @@ static void *listen_thread(void *) {
 extern "C" JNIEXPORT void JNICALL
 Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hwbpStartListen(
         JNIEnv *env, jobject, jobject callback) {
-    if (g_callback_ref) env->DeleteGlobalRef(g_callback_ref);
+    pthread_mutex_lock(&g_listen_mutex);
+    if (g_listen_thread) {
+        pthread_mutex_unlock(&g_listen_mutex);
+        return;
+    }
+
     g_callback_ref = env->NewGlobalRef(callback);
+    if (!g_callback_ref) {
+        pthread_mutex_unlock(&g_listen_mutex);
+        return;
+    }
 
     jclass cls = env->GetObjectClass(callback);
     g_on_event_mid = env->GetMethodID(cls, "onEvent",
         "(JJIILjava/lang/String;IIIJJJJJII[J[B)V");
-
-    g_stop.store(false);
-    if (pthread_create(&g_listen_thread, nullptr, listen_thread, nullptr) != 0) {
+    if (!g_on_event_mid) {
         env->DeleteGlobalRef(g_callback_ref);
         g_callback_ref = nullptr;
+        pthread_mutex_unlock(&g_listen_mutex);
+        return;
     }
+
+    g_stop.store(false);
+    const int create_error = pthread_create(&g_listen_thread, nullptr, listen_thread, nullptr);
+    if (create_error != 0) {
+        env->DeleteGlobalRef(g_callback_ref);
+        g_callback_ref = nullptr;
+        g_on_event_mid = nullptr;
+    }
+    pthread_mutex_unlock(&g_listen_mutex);
 }
 
 extern "C" JNIEXPORT void JNICALL
 Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hwbpStopListen(JNIEnv *env, jobject) {
+    pthread_mutex_lock(&g_listen_mutex);
     g_stop.store(true);
     if (g_listen_thread) {
         pthread_join(g_listen_thread, nullptr);
@@ -174,6 +244,8 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hwbpStopListen(JNIEnv *env, j
         env->DeleteGlobalRef(g_callback_ref);
         g_callback_ref = nullptr;
     }
+    g_on_event_mid = nullptr;
+    pthread_mutex_unlock(&g_listen_mutex);
 }
 
 extern "C" JNIEXPORT jobjectArray JNICALL

@@ -51,6 +51,7 @@ class App : Application() {
                 Context.MODE_PRIVATE
             )
         )
+        YggdrasilRepository.instance.useRootHwbp(this)
         Shell.enableVerboseLogging = BuildConfig.DEBUG
         Shell.setDefaultBuilder(
             Shell.Builder.create()

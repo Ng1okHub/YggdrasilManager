@@ -29,11 +29,13 @@ import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
@@ -94,11 +96,13 @@ internal class HwbpClientHub {
     }
 
     suspend fun broadcast(text: String) {
-        sessions.toList().forEach { session ->
+        val activeSessions = sessions.toList()
+        activeSessions.forEach { session ->
             try {
                 session.send(text)
             } catch (error: CancellationException) {
-                throw error
+                if (!currentCoroutineContext().isActive) throw error
+                remove(session)
             } catch (_: Exception) {
                 remove(session)
             }
@@ -119,7 +123,9 @@ internal fun Application.installHwbpWebRoutes(
     install(WebSockets)
     environment.monitor.subscribe(ApplicationStopped) { hub.clear() }
     launch {
-        bindings.events.collect { event -> hub.broadcast(encodeEvent(event)) }
+        bindings.events.collect { event ->
+            hub.broadcast(encodeEvent(event))
+        }
     }
     routing {
         get("/") {
