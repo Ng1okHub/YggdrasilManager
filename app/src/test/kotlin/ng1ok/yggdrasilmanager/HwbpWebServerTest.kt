@@ -256,7 +256,8 @@ class HwbpWebServerTest {
             context = mockk<Context>(relaxed = true),
             bindings = emptyBindings(),
             addressProvider = { "192.168.1.9" },
-            engineFactory = { engine },
+            engineFactory = { _, _ -> engine },
+            portAvailable = { true },
         )
 
         assertTrue(server.start().isSuccess)
@@ -270,7 +271,9 @@ class HwbpWebServerTest {
         server.stop()
 
         assertFalse(server.running.value)
-        verify(exactly = 1) { engine.stop(500, 1_500) }
+        assertNull(server.httpUrl.value)
+        assertNull(server.webSocketUrl.value)
+        verify(exactly = 1) { engine.stop(0, 5_000) }
     }
 
     @Test
@@ -282,7 +285,8 @@ class HwbpWebServerTest {
             context = mockk<Context>(relaxed = true),
             bindings = emptyBindings(),
             addressProvider = { "192.168.1.9" },
-            engineFactory = { engine },
+            engineFactory = { _, _ -> engine },
+            portAvailable = { true },
         )
 
         val result = server.start()
@@ -291,6 +295,48 @@ class HwbpWebServerTest {
         assertFalse(server.running.value)
         assertNull(server.httpUrl.value)
         assertNull(server.webSocketUrl.value)
+    }
+
+    @Test
+    fun waitsForThePreviousServerSocketBeforeStarting() {
+        val engine = mockk<ApplicationEngine>(relaxed = true)
+        every { engine.start(wait = false) } returns engine
+        var availabilityChecks = 0
+        val waits = mutableListOf<Long>()
+        val server = HwbpWebServer(
+            context = mockk<Context>(relaxed = true),
+            bindings = emptyBindings(),
+            addressProvider = { "192.168.1.9" },
+            engineFactory = { _, _ -> engine },
+            portAvailable = { ++availabilityChecks >= 3 },
+            sleeper = waits::add,
+        )
+
+        assertTrue(server.start().isSuccess)
+        assertEquals(3, availabilityChecks)
+        assertEquals(listOf(100L, 100L), waits)
+
+        server.stop()
+    }
+
+    @Test
+    fun occupiedPortIsReportedWithoutStartingKtor() {
+        val engine = mockk<ApplicationEngine>(relaxed = true)
+        var availabilityChecks = 0
+        val server = HwbpWebServer(
+            context = mockk<Context>(relaxed = true),
+            bindings = emptyBindings(),
+            engineFactory = { _, _ -> engine },
+            portAvailable = { ++availabilityChecks; false },
+            sleeper = {},
+        )
+
+        val result = server.start()
+
+        assertTrue(result.isFailure)
+        assertEquals(20, availabilityChecks)
+        assertFalse(server.running.value)
+        verify(exactly = 0) { engine.start(wait = false) }
     }
 
     private fun emptyBindings(
