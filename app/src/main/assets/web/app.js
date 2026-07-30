@@ -11,6 +11,7 @@ export function initialModel() {
     points: [],
     savedConfigs: [],
     events: [],
+    deduplicateStacks: false,
     backtraceMode: "fp",
     nextDisplayId: 1,
   };
@@ -42,6 +43,92 @@ export function clearEventsModel(model) {
     events: [],
     nextDisplayId: 1,
   };
+}
+
+export function setBacktraceDeduplication(model, enabled) {
+  return {
+    ...model,
+    deduplicateStacks: Boolean(enabled),
+  };
+}
+
+export function visibleEvents(model) {
+  return model.deduplicateStacks
+    ? keepLatestEventForEachBacktrace(model.events)
+    : model.events;
+}
+
+export function backtraceKey(event) {
+  const frames = Array.isArray(event?.backtrace) ? event.backtrace : [];
+  return JSON.stringify(frames.map((frame, position) => ({
+    index: frame?.index ?? position,
+    pc: frame?.pc ?? null,
+    module: frame?.module ?? null,
+    offset: frame?.offset ?? null,
+    label: frame?.label ?? null,
+  })));
+}
+
+export function formatBacktrace(event) {
+  const frames = Array.isArray(event?.backtrace) ? event.backtrace : [];
+  if (frames.length === 0) return "No frames";
+  return frames.map((frame, position) => {
+    const index = frame?.index ?? position;
+    const label = frame?.label || frame?.pc || "-";
+    const pc = frame?.pc;
+    return `#${index} ${label}${pc && pc !== label ? ` (${pc})` : ""}`;
+  }).join("\n");
+}
+
+export async function copyBacktraceToClipboard(
+  document,
+  event,
+  clipboard = globalThis.navigator?.clipboard,
+) {
+  const text = formatBacktrace(event);
+  if (typeof clipboard?.writeText === "function") {
+    try {
+      await clipboard.writeText(text);
+      return true;
+    } catch {
+      // LAN deployments are served over HTTP, where the async Clipboard API may be unavailable.
+    }
+  }
+  return copyTextWithSelection(document, text);
+}
+
+function keepLatestEventForEachBacktrace(events) {
+  const seen = new Set();
+  return events.filter((event) => {
+    const key = backtraceKey(event);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function copyTextWithSelection(document, text) {
+  if (!document?.body || typeof document.execCommand !== "function") return false;
+
+  const textarea = document.createElement("textarea");
+  textarea.value = text;
+  textarea.setAttribute("readonly", "");
+  textarea.setAttribute("aria-hidden", "true");
+  Object.assign(textarea.style, {
+    position: "fixed",
+    opacity: "0",
+    pointerEvents: "none",
+  });
+  document.body.append(textarea);
+  textarea.focus();
+  textarea.select();
+  try {
+    return document.execCommand("copy");
+  } catch {
+    return false;
+  } finally {
+    textarea.remove();
+  }
 }
 
 export function buildObserveCommand(values) {
@@ -238,6 +325,7 @@ export function createEventCard(
     dropped.textContent = `dropped ${event.dropped}`;
     meta.append(dropped);
   }
+  meta.append(createCopyBacktraceButton(document, event));
   summary.append(left, meta);
   details.append(summary);
 
@@ -284,6 +372,28 @@ function setEventCardOpen(card, open, autoOpened) {
   card.dataset.autoOpened = autoOpened ? "true" : "false";
   card.open = open;
   eventCardControllers.get(card)?.syncBody();
+}
+
+function createCopyBacktraceButton(document, event) {
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "copy-backtrace";
+  copy.textContent = "Copy stack";
+  copy.title = "Copy this hit's backtrace";
+  copy.setAttribute("aria-label", "Copy this hit's backtrace");
+  copy.addEventListener("click", async (clickEvent) => {
+    clickEvent?.preventDefault?.();
+    clickEvent?.stopPropagation?.();
+
+    const copied = await copyBacktraceToClipboard(document, event);
+    copy.textContent = copied ? "Copied" : "Copy failed";
+    copy.dataset.copyState = copied ? "success" : "error";
+    globalThis.setTimeout(() => {
+      copy.textContent = "Copy stack";
+      delete copy.dataset.copyState;
+    }, 1800);
+  });
+  return copy;
 }
 
 function createEventBody(document, event) {
@@ -375,6 +485,7 @@ function startBrowserClient(document, window) {
   const savedConfigCount = document.getElementById("saved-config-count");
   const events = document.getElementById("events");
   const eventCount = document.getElementById("event-count");
+  const deduplicateStacks = document.getElementById("deduplicate-stacks");
   const clearEvents = document.getElementById("clear-events");
   const modeGroup = document.getElementById("mode-group");
   const processKindGroup = document.getElementById("process-kind-group");
@@ -487,6 +598,10 @@ function startBrowserClient(document, window) {
     btInputs.forEach((input) => {
       input.checked = input.value === mode;
     });
+  }
+
+  function syncDeduplicateStacksUi() {
+    if (deduplicateStacks) deduplicateStacks.checked = model.deduplicateStacks;
   }
 
   function renderPoints() {
@@ -627,13 +742,14 @@ function startBrowserClient(document, window) {
   }
 
   function renderEvents() {
-    eventCount.textContent = String(model.events.length);
+    const visible = visibleEvents(model);
+    eventCount.textContent = String(visible.length);
     const fragment = document.createDocumentFragment();
 
-    if (model.events.length === 0) {
+    if (visible.length === 0) {
       fragment.append(createEmptyState(document, "Waiting for breakpoint hits…"));
     } else {
-      model.events.forEach((event, index) => {
+      visible.forEach((event, index) => {
         fragment.append(
           createEventCard(document, event, model.backtraceMode || "fp", index === 0),
         );
@@ -645,7 +761,7 @@ function startBrowserClient(document, window) {
 
   function prependNewestEvent(event) {
     prependEventCard(document, events, event, model.backtraceMode || "fp");
-    eventCount.textContent = String(model.events.length);
+    eventCount.textContent = String(visibleEvents(model).length);
   }
 
   function handleServerMessage(raw) {
@@ -688,7 +804,13 @@ function startBrowserClient(document, window) {
       renderSavedConfigs();
       syncBacktraceModeUi();
     }
-    if (message.type === "event") prependNewestEvent(model.events[0]);
+    if (message.type === "event") {
+      if (model.deduplicateStacks) {
+        renderEvents();
+      } else {
+        prependNewestEvent(model.events[0]);
+      }
+    }
   }
 
   function scheduleReconnect() {
@@ -790,11 +912,17 @@ function startBrowserClient(document, window) {
     renderEvents();
   });
 
+  deduplicateStacks?.addEventListener("change", () => {
+    model = setBacktraceDeduplication(model, deduplicateStacks.checked);
+    renderEvents();
+  });
+
   syncProcessKind();
   syncTargetKind();
   syncModeLength();
   syncSaveConfig();
   syncBacktraceModeUi();
+  syncDeduplicateStacksUi();
   renderPoints();
   renderSavedConfigs();
   renderEvents();

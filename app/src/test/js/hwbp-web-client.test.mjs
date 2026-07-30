@@ -11,10 +11,14 @@ import {
   buildSaveConfigCommand,
   buildUnobserveCommand,
   clearEventsModel,
+  copyBacktraceToClipboard,
   createEventCard,
+  formatBacktrace,
   initialModel,
   prependEventCard,
   reduceServerMessage,
+  setBacktraceDeduplication,
+  visibleEvents,
 } from "../../main/assets/web/app.js";
 
 test("state replaces observe points and backtrace mode", () => {
@@ -42,12 +46,89 @@ test("events prepend, assign local displayId, and cap at 500", () => {
   assert.equal(model.events.at(-1).displayId, 26);
 });
 
+test("stack deduplication hides duplicate stacks without discarding hit history", () => {
+  let model = initialModel();
+  model = reduceServerMessage(model, browserEvent(1));
+  model = reduceServerMessage(model, {
+    ...browserEvent(2),
+    tid: 99,
+    comm: "another-thread",
+  });
+
+  model = setBacktraceDeduplication(model, true);
+  assert.equal(model.events.length, 2);
+  assert.equal(visibleEvents(model).length, 1);
+  assert.equal(visibleEvents(model)[0].seq, 102);
+  assert.equal(model.nextDisplayId, 3);
+
+  model = reduceServerMessage(model, {
+    ...browserEvent(3),
+    watchedAddr: "0x2000",
+  });
+  assert.equal(model.events.length, 3);
+  assert.equal(visibleEvents(model).length, 1);
+  assert.equal(visibleEvents(model)[0].seq, 103);
+  assert.equal(model.nextDisplayId, 4);
+
+  const distinct = reduceServerMessage(model, {
+    ...browserEvent(4),
+    backtrace: [{
+      ...browserEvent(4).backtrace[0],
+      pc: "0x2001",
+    }],
+  });
+  assert.equal(distinct.events.length, 4);
+  assert.equal(visibleEvents(distinct).length, 2);
+  assert.equal(visibleEvents(distinct)[0].displayId, 4);
+
+  const withoutDeduplication = setBacktraceDeduplication(distinct, false);
+  assert.deepEqual(
+    visibleEvents(withoutDeduplication).map((event) => event.seq),
+    [104, 103, 102, 101],
+  );
+});
+
+test("backtrace formatting and copy preserve ordered frame details", async () => {
+  const event = {
+    ...browserEvent(1),
+    backtrace: [
+      { index: 0, pc: "0x2000", label: "libtarget.so+0x20" },
+      { index: 1, pc: "0x2100", label: "0x2100" },
+    ],
+  };
+  const expected = "#0 libtarget.so+0x20 (0x2000)\n#1 0x2100";
+  assert.equal(formatBacktrace(event), expected);
+
+  let copiedText = null;
+  const clipboard = {
+    writeText: async (text) => {
+      copiedText = text;
+    },
+  };
+  assert.equal(await copyBacktraceToClipboard(new FakeDocument(), event, clipboard), true);
+  assert.equal(copiedText, expected);
+});
+
+test("backtrace copy falls back to a text selection on HTTP clipboard failures", async () => {
+  const document = new FakeDocument();
+  const event = browserEvent(1);
+  const copied = await copyBacktraceToClipboard(document, event, {
+    writeText: async () => {
+      throw new Error("clipboard blocked");
+    },
+  });
+
+  assert.equal(copied, true);
+  assert.equal(document.copiedText, formatBacktrace(event));
+});
+
 test("event cards build and discard details body as they toggle", () => {
   const document = new FakeDocument();
   const card = createEventCard(document, browserEvent(1));
 
   assert.equal(card.open, false);
   assert.equal(card.childElementCount, 1);
+  assert.equal(card.firstElementChild.lastElementChild.lastElementChild.textContent, "Copy stack");
 
   card.open = true;
   card.dispatchEvent({ type: "toggle" });
@@ -266,8 +347,19 @@ function browserEvent(displayId) {
 }
 
 class FakeDocument {
+  constructor() {
+    this.body = new FakeElement("body");
+    this.copiedText = null;
+  }
+
   createElement(tagName) {
     return new FakeElement(tagName);
+  }
+
+  execCommand(command) {
+    if (command !== "copy") return false;
+    this.copiedText = this.body.lastElementChild?.value ?? null;
+    return true;
   }
 }
 
@@ -280,6 +372,8 @@ class FakeElement {
     this.dataset = {};
     this.open = false;
     this.textContent = "";
+    this.value = "";
+    this.style = {};
     this.listeners = new Map();
   }
 
@@ -336,6 +430,12 @@ class FakeElement {
     listeners.push(listener);
     this.listeners.set(type, listeners);
   }
+
+  setAttribute() {}
+
+  focus() {}
+
+  select() {}
 
   dispatchEvent(event) {
     for (const listener of this.listeners.get(event.type) ?? []) {

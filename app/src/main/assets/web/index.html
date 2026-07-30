@@ -398,6 +398,12 @@
         display: flex;
         align-items: center;
         gap: 10px;
+        flex-wrap: wrap;
+        justify-content: flex-end;
+      }
+
+      .events-toolbar .checkbox-row {
+        white-space: nowrap;
       }
 
       #events {
@@ -472,6 +478,33 @@
         color: #fde68a;
         border-color: rgba(251,191,36,.3);
         background: rgba(251,191,36,.08);
+      }
+
+      .copy-backtrace {
+        min-height: 26px;
+        padding: 0 8px;
+        border: 1px solid var(--border-strong);
+        border-radius: 6px;
+        background: rgba(255,255,255,0.03);
+        color: var(--text-muted);
+        font-size: 11px;
+        font-weight: 700;
+      }
+
+      .copy-backtrace:hover {
+        border-color: rgba(56, 189, 248, 0.45);
+        background: var(--accent-soft);
+        color: var(--text);
+      }
+
+      .copy-backtrace[data-copy-state="success"] {
+        border-color: rgba(74, 222, 128, 0.45);
+        color: #bbf7d0;
+      }
+
+      .copy-backtrace[data-copy-state="error"] {
+        border-color: rgba(251, 113, 133, 0.45);
+        color: #fecdd3;
       }
 
       .event-body {
@@ -778,6 +811,10 @@
             <h2 id="events-heading">Hit stream</h2>
             <div class="events-toolbar">
               <span class="count"><span id="event-count">0</span> events</span>
+              <label class="checkbox-row" title="Keep only the latest hit for each identical call stack">
+                <input id="deduplicate-stacks" type="checkbox">
+                Deduplicate stacks
+              </label>
               <button id="clear-events" class="clear-command" type="button">Clear</button>
             </div>
           </div>
