@@ -2,26 +2,32 @@ package ng1ok.yggdrasilmanager.ui.hidedbg
 
 import android.graphics.drawable.Drawable
 import android.widget.ImageView
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Apps
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.Security
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -35,6 +41,7 @@ import androidx.compose.material3.SegmentedButtonDefaults
 import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -72,64 +79,223 @@ fun HideDbgScreen(vm: HideDbgViewModel = viewModel(factory = HideDbgViewModel.Fa
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
-        Column(modifier = Modifier.fillMaxSize()) {
-            GlobalSetting(
-                state = state,
-                onToggle = vm::toggleGlobal
-            )
-            HorizontalDivider()
-            AppControls(
-                state = state,
-                onQueryChange = vm::setQuery,
-                onFilterChange = vm::setFilter,
-                onRefresh = vm::refreshApps
-            )
-            HorizontalDivider()
-            AppsPanel(
-                state = state,
-                onToggleUid = vm::toggleUid,
-                onRetry = vm::refreshApps,
-                modifier = Modifier.weight(1f)
-            )
+        BoxWithConstraints(
+            modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+            contentAlignment = Alignment.TopCenter
+        ) {
+            val useCompactLandscape = maxHeight < 480.dp && maxWidth >= 480.dp
+            val useSideBySideHeader = maxWidth >= 700.dp
+
+            Column(
+                modifier = Modifier
+                    .widthIn(max = 840.dp)
+                    .fillMaxSize()
+                    .padding(vertical = if (useCompactLandscape) 8.dp else 16.dp)
+            ) {
+                if (useCompactLandscape) {
+                    if (useSideBySideHeader) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(12.dp),
+                            verticalAlignment = Alignment.Top
+                        ) {
+                            GlobalSetting(
+                                state = state,
+                                onToggle = vm::toggleGlobal,
+                                compact = true,
+                                modifier = Modifier.weight(5f)
+                            )
+                            Column(modifier = Modifier.weight(7f)) {
+                                AppsSectionHeader(
+                                    state = state,
+                                    onRefresh = vm::refreshApps
+                                )
+                                Spacer(modifier = Modifier.height(4.dp))
+                                AppControls(
+                                    state = state,
+                                    onQueryChange = vm::setQuery,
+                                    onFilterChange = vm::setFilter,
+                                    onRefresh = vm::refreshApps,
+                                    compact = true
+                                )
+                            }
+                        }
+                    } else {
+                        GlobalSetting(
+                            state = state,
+                            onToggle = vm::toggleGlobal,
+                            compact = true
+                        )
+                        Spacer(modifier = Modifier.height(8.dp))
+                        AppsSectionHeader(
+                            state = state,
+                            onRefresh = vm::refreshApps
+                        )
+                        Spacer(modifier = Modifier.height(4.dp))
+                        AppControls(
+                            state = state,
+                            onQueryChange = vm::setQuery,
+                            onFilterChange = vm::setFilter,
+                            onRefresh = vm::refreshApps,
+                            compact = true
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+                } else {
+                    GlobalSetting(
+                        state = state,
+                        onToggle = vm::toggleGlobal
+                    )
+                    Spacer(modifier = Modifier.height(24.dp))
+                    AppsSectionHeader(state = state)
+                    Spacer(modifier = Modifier.height(12.dp))
+                    AppControls(
+                        state = state,
+                        onQueryChange = vm::setQuery,
+                        onFilterChange = vm::setFilter,
+                        onRefresh = vm::refreshApps
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                }
+                AppsPanel(
+                    state = state,
+                    onToggleUid = vm::toggleUid,
+                    onRetry = vm::refreshApps,
+                    compact = useCompactLandscape,
+                    modifier = Modifier.weight(1f)
+                )
+            }
         }
 
         SnackbarHost(
             hostState = snackbarHostState,
-            modifier = Modifier.align(Alignment.BottomCenter).padding(16.dp)
+            modifier = Modifier
+                .align(Alignment.BottomCenter)
+                .widthIn(max = 840.dp)
+                .fillMaxWidth()
+                .padding(16.dp)
         )
     }
 }
 
 @Composable
-private fun GlobalSetting(state: HideDbgUiState, onToggle: () -> Unit) {
+private fun GlobalSetting(
+    state: HideDbgUiState,
+    onToggle: () -> Unit,
+    compact: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        tonalElevation = 1.dp
+    ) {
+        Column(
+            modifier = Modifier.padding(if (compact) 12.dp else 16.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth().heightIn(min = 56.dp),
+                horizontalArrangement = Arrangement.spacedBy(if (compact) 8.dp else 12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(if (compact) 40.dp else 48.dp)
+                        .background(
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            shape = MaterialTheme.shapes.medium
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Security,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(24.dp)
+                    )
+                }
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "全局 Hide DBG",
+                        style = MaterialTheme.typography.titleMedium
+                    )
+                    Text(
+                        text = if (compact && state.globalEnabled) {
+                            "已啟用，單項設定已被覆蓋"
+                        } else {
+                            "為所有 App 隱藏調試器狀態"
+                        },
+                        style = if (compact) {
+                            MaterialTheme.typography.bodySmall
+                        } else {
+                            MaterialTheme.typography.bodyMedium
+                        },
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                ToggleSlot(
+                    accessibilityLabel = "全局 Hide DBG",
+                    checked = state.globalEnabled,
+                    enabled = state.pendingUids.isEmpty(),
+                    pending = state.globalPending,
+                    onToggle = onToggle
+                )
+            }
+
+            if (state.globalEnabled && !compact) {
+                Text(
+                    text = "全局模式已啟用，單項設定已被覆蓋",
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            color = MaterialTheme.colorScheme.primaryContainer,
+                            shape = MaterialTheme.shapes.small
+                        )
+                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun AppsSectionHeader(
+    state: HideDbgUiState,
+    onRefresh: (() -> Unit)? = null
+) {
     Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .heightIn(min = 84.dp)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
         verticalAlignment = Alignment.CenterVertically
     ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = "全局 Hide DBG",
-                style = MaterialTheme.typography.titleMedium
-            )
-            Text(
-                text = "為所有 App 隱藏調試器狀態",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-        }
-        ToggleSlot(
-            accessibilityLabel = "全局 Hide DBG",
-            checked = state.globalEnabled,
-            enabled = state.pendingUids.isEmpty(),
-            pending = state.globalPending,
-            onToggle = onToggle
+        Text(
+            text = "App 設定",
+            style = MaterialTheme.typography.titleMedium
         )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(4.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Text(
+                text = if (state.loadingApps && state.apps.isEmpty()) {
+                    "正在載入"
+                } else {
+                    "${state.visibleApps.size} 個結果"
+                },
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            onRefresh?.let {
+                RefreshAppsButton(
+                    loading = state.loadingApps,
+                    onRefresh = it
+                )
+            }
+        }
     }
 }
 
@@ -139,60 +305,158 @@ private fun AppControls(
     state: HideDbgUiState,
     onQueryChange: (String) -> Unit,
     onFilterChange: (AppFilter) -> Unit,
-    onRefresh: () -> Unit
+    onRefresh: () -> Unit,
+    compact: Boolean = false
 ) {
-    Column(
-        modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
+    if (compact) {
         Row(
             modifier = Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            OutlinedTextField(
-                value = state.query,
-                onValueChange = onQueryChange,
-                modifier = Modifier.weight(1f),
-                label = { Text("搜尋 App") },
-                leadingIcon = {
-                    Icon(
-                        imageVector = Icons.Default.Search,
-                        contentDescription = null
-                    )
-                },
-                singleLine = true
+            SearchControls(
+                state = state,
+                onQueryChange = onQueryChange,
+                onRefresh = onRefresh,
+                compact = true,
+                showRefresh = false,
+                modifier = Modifier.weight(5f)
             )
-            IconButton(
-                onClick = onRefresh,
-                enabled = !state.loadingApps,
-                modifier = Modifier.size(48.dp)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.Refresh,
-                    contentDescription = "重新整理 App"
-                )
-            }
+            FilterControls(
+                selectedFilter = state.filter,
+                onFilterChange = onFilterChange,
+                compact = true,
+                modifier = Modifier.weight(6f)
+            )
         }
+    } else {
+        Column(
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            SearchControls(
+                state = state,
+                onQueryChange = onQueryChange,
+                onRefresh = onRefresh
+            )
+            FilterControls(
+                selectedFilter = state.filter,
+                onFilterChange = onFilterChange
+            )
+        }
+    }
+}
 
-        SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-            AppFilter.entries.forEachIndexed { index, filter ->
-                SegmentedButton(
-                    selected = state.filter == filter,
-                    onClick = { onFilterChange(filter) },
-                    shape = SegmentedButtonDefaults.itemShape(
-                        index = index,
-                        count = AppFilter.entries.size
-                    ),
-                    label = {
-                        Text(
-                            text = filter.label,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis
+@Composable
+private fun SearchControls(
+    state: HideDbgUiState,
+    onQueryChange: (String) -> Unit,
+    onRefresh: () -> Unit,
+    compact: Boolean = false,
+    showRefresh: Boolean = true,
+    modifier: Modifier = Modifier
+) {
+    Row(
+        modifier = modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        OutlinedTextField(
+            value = state.query,
+            onValueChange = onQueryChange,
+            modifier = Modifier.weight(1f),
+            label = {
+                Text(
+                    text = if (compact) "搜尋" else "搜尋 App",
+                    maxLines = 1
+                )
+            },
+            leadingIcon = {
+                Icon(
+                    imageVector = Icons.Default.Search,
+                    contentDescription = null
+                )
+            },
+            trailingIcon = if (state.query.isNotEmpty()) {
+                {
+                    IconButton(
+                        onClick = { onQueryChange("") },
+                        modifier = Modifier.size(48.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Close,
+                            contentDescription = "清除搜尋"
                         )
                     }
-                )
-            }
+                }
+            } else {
+                null
+            },
+            singleLine = true
+        )
+        if (showRefresh) {
+            RefreshAppsButton(
+                loading = state.loadingApps,
+                onRefresh = onRefresh
+            )
+        }
+    }
+}
+
+@Composable
+private fun RefreshAppsButton(loading: Boolean, onRefresh: () -> Unit) {
+    IconButton(
+        onClick = onRefresh,
+        enabled = !loading,
+        modifier = Modifier.size(48.dp)
+    ) {
+        if (loading) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(22.dp).semantics {
+                    contentDescription = "正在重新整理 App"
+                },
+                strokeWidth = 2.dp
+            )
+        } else {
+            Icon(
+                imageVector = Icons.Default.Refresh,
+                contentDescription = "重新整理 App"
+            )
+        }
+    }
+}
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FilterControls(
+    selectedFilter: AppFilter,
+    onFilterChange: (AppFilter) -> Unit,
+    compact: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    SingleChoiceSegmentedButtonRow(modifier = modifier.fillMaxWidth()) {
+        AppFilter.entries.forEachIndexed { index, filter ->
+            SegmentedButton(
+                selected = selectedFilter == filter,
+                onClick = { onFilterChange(filter) },
+                modifier = Modifier.heightIn(min = 48.dp),
+                shape = SegmentedButtonDefaults.itemShape(
+                    index = index,
+                    count = AppFilter.entries.size
+                ),
+                label = {
+                    Text(
+                        text = filter.label,
+                        style = if (compact) {
+                            MaterialTheme.typography.labelMedium
+                        } else {
+                            MaterialTheme.typography.labelLarge
+                        },
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            )
         }
     }
 }
@@ -202,54 +466,63 @@ private fun AppsPanel(
     state: HideDbgUiState,
     onToggleUid: (Int) -> Unit,
     onRetry: () -> Unit,
+    compact: Boolean = false,
     modifier: Modifier = Modifier
 ) {
     val loadError = state.appLoadError
     val visibleApps = state.visibleApps
     val sharedUids = state.sharedUids
 
-    when {
-        state.loadingApps && state.apps.isEmpty() -> {
-            Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
-        }
-
-        state.isAppLoadErrorBlocking() -> {
-            LoadFailure(
-                message = requireNotNull(loadError),
-                onRetry = onRetry,
-                modifier = modifier
-            )
-        }
-
-        else -> {
-            Column(modifier = modifier.fillMaxWidth()) {
-                loadError?.let { message ->
-                    InlineLoadFailure(message = message, onRetry = onRetry)
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        when {
+            state.loadingApps && state.apps.isEmpty() -> {
+                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
                 }
+            }
 
-                if (visibleApps.isEmpty()) {
-                    EmptyApps(
-                        hasInstalledApps = state.apps.isNotEmpty(),
-                        modifier = Modifier.weight(1f)
-                    )
-                } else {
-                    LazyColumn(
-                        modifier = Modifier.weight(1f).fillMaxWidth(),
-                        contentPadding = PaddingValues(bottom = 16.dp)
-                    ) {
-                        items(visibleApps, key = InstalledApp::packageName) { app ->
-                            Column {
-                                AppRow(
-                                    app = app,
-                                    sharedUid = app.uid in sharedUids,
-                                    checked = app.uid in state.enabledUids,
-                                    enabled = state.canToggleUid(app.uid),
-                                    pending = app.uid in state.pendingUids,
-                                    onToggle = { onToggleUid(app.uid) }
-                                )
-                                HorizontalDivider(modifier = Modifier.padding(start = 72.dp))
+            state.isAppLoadErrorBlocking() -> {
+                LoadFailure(
+                    message = requireNotNull(loadError),
+                    onRetry = onRetry,
+                    compact = compact,
+                    modifier = Modifier.fillMaxSize()
+                )
+            }
+
+            else -> {
+                Column(modifier = Modifier.fillMaxSize()) {
+                    loadError?.let { message ->
+                        InlineLoadFailure(message = message, onRetry = onRetry)
+                    }
+
+                    if (visibleApps.isEmpty()) {
+                        EmptyApps(
+                            hasInstalledApps = state.apps.isNotEmpty(),
+                            modifier = Modifier.weight(1f)
+                        )
+                    } else {
+                        LazyColumn(
+                            modifier = Modifier.weight(1f).fillMaxWidth(),
+                            contentPadding = PaddingValues(vertical = 4.dp)
+                        ) {
+                            items(visibleApps, key = InstalledApp::packageName) { app ->
+                                Column {
+                                    AppRow(
+                                        app = app,
+                                        sharedUid = app.uid in sharedUids,
+                                        checked = app.uid in state.enabledUids,
+                                        enabled = state.canToggleUid(app.uid),
+                                        pending = app.uid in state.pendingUids,
+                                        onToggle = { onToggleUid(app.uid) }
+                                    )
+                                    HorizontalDivider(modifier = Modifier.padding(start = 72.dp))
+                                }
                             }
                         }
                     }
@@ -285,7 +558,7 @@ private fun InlineLoadFailure(message: String, onRetry: () -> Unit) {
         )
         IconButton(
             onClick = onRetry,
-            modifier = Modifier.size(40.dp)
+            modifier = Modifier.size(48.dp)
         ) {
             Icon(
                 imageVector = Icons.Default.Refresh,
@@ -297,7 +570,50 @@ private fun InlineLoadFailure(message: String, onRetry: () -> Unit) {
 }
 
 @Composable
-private fun LoadFailure(message: String, onRetry: () -> Unit, modifier: Modifier = Modifier) {
+private fun LoadFailure(
+    message: String,
+    onRetry: () -> Unit,
+    compact: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    if (compact) {
+        Row(
+            modifier = modifier
+                .fillMaxWidth()
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                imageVector = Icons.Default.ErrorOutline,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.error,
+                modifier = Modifier.size(24.dp)
+            )
+            Text(
+                text = message,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis
+            )
+            Button(
+                onClick = onRetry,
+                modifier = Modifier.heightIn(min = 48.dp)
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Refresh,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp)
+                )
+                Spacer(modifier = Modifier.width(4.dp))
+                Text("重試")
+            }
+        }
+        return
+    }
+
     Box(modifier = modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
         Column(
             modifier = Modifier.padding(24.dp),
@@ -315,7 +631,10 @@ private fun LoadFailure(message: String, onRetry: () -> Unit, modifier: Modifier
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.error
             )
-            Button(onClick = onRetry) {
+            Button(
+                onClick = onRetry,
+                modifier = Modifier.heightIn(min = 48.dp)
+            ) {
                 Icon(
                     imageVector = Icons.Default.Refresh,
                     contentDescription = null,
