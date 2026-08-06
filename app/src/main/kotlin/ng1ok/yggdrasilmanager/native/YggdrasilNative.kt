@@ -10,6 +10,9 @@ interface YggdrasilNativeApi {
     fun hwbpUnobserve(pid: Int, targetAddr: Long): Int
     fun hwbpStartListen(callback: HwbpEventCallback)
     fun hwbpStopListen()
+    fun syscallConfigure(op: Int, flags: Int, syscallNr: Int, targetId: Long): Int
+    fun syscallStartListen(callback: SyscallEventCallback): Int
+    fun syscallStopListen()
     fun hideDbg(enable: Boolean, hasUid: Boolean, uid: Int): Int
     fun hwbpUnwindDwarf(
         pid: Int,
@@ -52,6 +55,36 @@ interface HwbpEventCallback {
     )
 }
 
+interface SyscallEventCallback {
+    /** Called by the process that owns the native reader once it is ready. */
+    fun onListenerStarted() = Unit
+
+    /** Records events dropped by a forwarding queue before the next callback. */
+    fun onRelayDropped(count: Long) = Unit
+
+    fun onEvent(
+        seq: Long,
+        dropped: Long,
+        callId: Long,
+        phase: Int,
+        tid: Int,
+        tgid: Int,
+        syscallNr: Int,
+        eventFlags: Int,
+        ruleFlags: Int,
+        targetId: Long,
+        comm: String,
+        userCookie: Long,
+        argMask: Long,
+        argsBefore: LongArray,
+        argsAfter: LongArray,
+        returnBefore: Long,
+        returnAfter: Long,
+    )
+
+    fun onListenerFailure(error: Int)
+}
+
 object YggdrasilNative : YggdrasilNativeApi {
     init {
         System.loadLibrary("yggdrasilmanager")
@@ -63,6 +96,9 @@ object YggdrasilNative : YggdrasilNativeApi {
     external override fun hwbpUnobserve(pid: Int, targetAddr: Long): Int
     external override fun hwbpStartListen(callback: HwbpEventCallback)
     external override fun hwbpStopListen()
+    external override fun syscallConfigure(op: Int, flags: Int, syscallNr: Int, targetId: Long): Int
+    external override fun syscallStartListen(callback: SyscallEventCallback): Int
+    external override fun syscallStopListen()
     external override fun hideDbg(enable: Boolean, hasUid: Boolean, uid: Int): Int
 
     override fun hwbpUnwindDwarf(

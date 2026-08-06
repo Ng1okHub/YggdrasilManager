@@ -52,6 +52,7 @@ class App : Application() {
             )
         )
         YggdrasilRepository.instance.useRootHwbp(this)
+        YggdrasilRepository.instance.useRootSyscall(this)
         Shell.enableVerboseLogging = BuildConfig.DEBUG
         Shell.setDefaultBuilder(
             Shell.Builder.create()

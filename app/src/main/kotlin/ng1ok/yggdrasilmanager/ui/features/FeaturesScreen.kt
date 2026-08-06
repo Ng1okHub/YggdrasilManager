@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.BugReport
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -45,6 +46,12 @@ private data class FeatureItem(
 )
 
 private val features = listOf(
+    FeatureItem(
+        destination = AppDestination.Syscall,
+        category = "執行期追蹤",
+        description = "透過網頁控制台觀察 ARM64 系統呼叫的參數與返回值",
+        icon = Icons.Default.Terminal
+    ),
     FeatureItem(
         destination = AppDestination.Hwbp,
         category = "內存觀察",

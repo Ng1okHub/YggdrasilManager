@@ -14,6 +14,7 @@ enum class AppDestination(
     Home("home", "主頁", true, Icons.Default.Home),
     Features("features", "功能", true, Icons.AutoMirrored.Filled.List),
     Hwbp("hwbp", "HWBP Observe", false),
+    Syscall("syscall", "Arm64 Syscall Observe", false),
     HideDbg("hidedbg", "Hide DBG", false);
 
     val showBackButton: Boolean

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Arm64 Syscall Observe</title>
+    <link rel="stylesheet" href="/static/styles.css">
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 17l6-6-6-6"></path>
+            <path d="M12 19h8"></path>
+          </svg>
+        </span>
+        <div>
+          <p class="eyebrow">Yggdrasil</p>
+          <h1>Arm64 Syscall Observe</h1>
+        </div>
+      </div>
+      <div id="connection" class="connection connection--pending" aria-live="polite">正在連線</div>
+    </header>
+
+    <main class="workspace">
+      <aside class="rules-pane" aria-label="觀察規則">
+        <section class="rule-editor">
+          <div class="section-heading">
+            <h2>規則</h2>
+            <span id="rule-count" class="count">0</span>
+          </div>
+          <form id="rule-form" novalidate>
+            <label class="field">
+              <span>Syscall編號</span>
+              <input id="syscall-nr" name="syscallNr" type="number" min="0" max="459" step="1" inputmode="numeric" required>
+            </label>
+            <p id="syscall-name" class="field-hint" aria-live="polite"></p>
+
+            <label class="field">
+              <span>範圍</span>
+              <select id="scope" name="scope">
+                <option value="tgid" selected>Process（TGID）</option>
+                <option value="tid">Thread（TID）</option>
+                <option value="uid">App（UID）</option>
+              </select>
+            </label>
+            <label class="field" id="target-field">
+              <span id="target-label">Process ID（TGID）</span>
+              <input id="target-id" name="targetId" type="number" min="1" max="2147483647" step="1" inputmode="numeric" required>
+            </label>
+
+            <fieldset class="phase-field">
+              <legend>觀察階段</legend>
+              <div class="segmented-control">
+                <label><input type="radio" name="phase" value="enter"> <span>Enter</span></label>
+                <label><input type="radio" name="phase" value="exit"> <span>Exit</span></label>
+                <label><input type="radio" name="phase" value="both" checked> <span>Both</span></label>
+              </div>
+            </fieldset>
+            <button class="button button--primary" type="submit">新增規則</button>
+          </form>
+          <p id="command-status" class="command-status" aria-live="polite"></p>
+        </section>
+
+        <section class="rule-list-section" aria-label="作用中觀察規則">
+          <div id="rule-list" class="rule-list"></div>
+        </section>
+      </aside>
+
+      <section class="events-pane" aria-label="Syscall事件">
+        <div class="events-toolbar">
+          <div class="section-heading">
+            <h2>呼叫紀錄</h2>
+            <span id="event-count" class="count">0</span>
+          </div>
+          <div class="events-controls">
+            <span id="listener-status" class="listener-status listener-status--starting" aria-live="polite">讀取器正在啟動</span>
+            <button id="restart-listener" class="button button--quiet" type="button">重新啟動讀取器</button>
+            <button id="clear-events" class="button button--quiet" type="button">清除畫面</button>
+          </div>
+        </div>
+        <div id="event-list" class="event-list" aria-live="polite"></div>
+      </section>
+    </main>
+
+    <template id="empty-rules-template">
+      <p class="empty-state">目前沒有作用中規則</p>
+    </template>
+    <template id="empty-events-template">
+      <p class="empty-state">尚未收到呼叫紀錄</p>
+    </template>
+    <script type="module" src="/static/app.js"></script>
+  </body>
+</html>
