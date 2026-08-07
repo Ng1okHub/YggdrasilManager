@@ -18,9 +18,16 @@ data class SyscallEvent(
     val argsAfter: List<Long>,
     val returnBefore: Long,
     val returnAfter: Long,
+    /** Validated Yggdrasil capture TLVs, retained for typed userspace decoding. */
+    val captureCount: Int = 0,
+    val capturePayload: ByteArray = ByteArray(0),
     /** Events lost by the root/App forwarding queues before this record. */
     val relayDropped: Long = 0,
 ) {
+    val captures: List<SyscallCapture> by lazy(LazyThreadSafetyMode.NONE) {
+        SyscallCaptureDecoder.decode(captureCount, capturePayload)
+    }
+
     val syscallName: String
         get() = Arm64SyscallCatalog.nameFor(syscallNr)
 

@@ -57,6 +57,8 @@ internal class RootSyscallOperations(context: Context) : SyscallOperations {
                     argsAfter = value.argsAfter,
                     returnBefore = value.returnBefore,
                     returnAfter = value.returnAfter,
+                    captureCount = value.captureCount,
+                    capturePayload = value.capturePayload,
                 )
             } catch (_: RuntimeException) {
             }

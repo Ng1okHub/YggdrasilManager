@@ -652,6 +652,17 @@ select {
   white-space: nowrap;
 }
 
+.event-capture-preview {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--accent);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.4;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .event-meta {
   display: flex;
   align-items: center;
@@ -728,6 +739,10 @@ select {
   border-left-color: var(--warning);
 }
 
+.event-arg--captured {
+  grid-column: span 2;
+}
+
 .event-arg-label,
 .event-detail-label {
   color: var(--faint);
@@ -744,6 +759,40 @@ select {
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.event-arg-capture {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  margin-top: 5px;
+  padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+
+.event-capture-kind,
+.event-capture-meta {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+.event-capture-kind {
+  color: var(--accent);
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.event-capture-value {
+  max-height: 9rem;
+  overflow: auto;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .event-detail-grid {
@@ -860,6 +909,10 @@ select {
   .event-args,
   .event-detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .event-arg--captured {
+    grid-column: auto;
   }
 }
 

@@ -191,6 +191,8 @@ class YggdrasilRepository(
             argsAfter: LongArray,
             returnBefore: Long,
             returnAfter: Long,
+            captureCount: Int,
+            capturePayload: ByteArray,
         ) {
             val pendingRelayDrops = syscallRelayDropped.getAndSet(0)
             val event = SyscallEvent(
@@ -211,6 +213,8 @@ class YggdrasilRepository(
                     argsAfter = argsAfter.toList(),
                     returnBefore = returnBefore,
                     returnAfter = returnAfter,
+                    captureCount = captureCount,
+                    capturePayload = capturePayload.copyOf(),
                     relayDropped = pendingRelayDrops,
                 )
             if (syscallEventQueue.trySend(event).isFailure) {

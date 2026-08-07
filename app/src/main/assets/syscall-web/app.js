@@ -79,6 +79,8 @@ export function reduceServerMessage(model, message) {
   const existingIndex = findMatchingEntry(model.events, message);
   if (existingIndex >= 0) {
     const existing = model.events[existingIndex];
+    const entryCaptures = Array.isArray(existing.captures) ? existing.captures : [];
+    const exitCaptures = Array.isArray(message.captures) ? message.captures : [];
     const completed = {
       ...existing,
       ...message,
@@ -88,6 +90,7 @@ export function reduceServerMessage(model, message) {
       exitSeq: message.seq,
       args: Array.isArray(existing.args) ? existing.args : message.args,
       argsBefore: Array.isArray(existing.argsBefore) ? existing.argsBefore : message.argsBefore,
+      captures: [...entryCaptures, ...exitCaptures],
       afterDropped: Boolean(existing.afterDropped || message.afterDropped),
     };
     return {
@@ -207,6 +210,34 @@ export function formatReturn(value) {
   } catch {
     return value;
   }
+}
+
+export function formatCapture(capture) {
+  const kind = typeof capture?.kind === "string" && capture.kind
+    ? capture.kind
+    : "capture";
+  const schema = typeof capture?.schema === "string" && capture.schema !== "none"
+    ? capture.schema
+    : kind;
+  const phase = capture?.phase === "exit" ? "exit" : "enter";
+  const status = typeof capture?.status === "string" && capture.status
+    ? capture.status
+    : "ok";
+  const capturedLength = Number.isSafeInteger(capture?.capturedLength)
+    ? capture.capturedLength
+    : 0;
+  const originalLength = Number.isSafeInteger(capture?.originalLength)
+    ? capture.originalLength
+    : capturedLength;
+  const value = typeof capture?.value === "string"
+    ? capture.value
+    : (status === "ok" ? "<empty>" : `<${status}>`);
+  const address = typeof capture?.address === "string" ? capture.address : "-";
+  return {
+    label: `${phase} | ${schema}`,
+    value,
+    meta: `${capturedLength}/${originalLength} B | ${status} | ${address}`,
+  };
 }
 
 function createElement(documentRef, tag, className, text) {
@@ -477,6 +508,17 @@ function renderEvent(documentRef, event) {
     createElement(documentRef, "div", "event-title", `${event.syscallNr} ${event.name || syscallName(event.syscallNr)}`),
     renderEventMeta(documentRef, event),
   );
+  const capturePreview = (Array.isArray(event.captures) ? event.captures : [])
+    .find((capture) => typeof capture?.value === "string");
+  if (capturePreview) {
+    const formatted = formatCapture(capturePreview);
+    titleBlock.append(createElement(
+      documentRef,
+      "div",
+      "event-capture-preview",
+      `x${capturePreview.argIndex} = ${formatted.value}`,
+    ));
+  }
   const phase = createElement(
     documentRef,
     "span",
@@ -509,17 +551,33 @@ function renderEventDetails(documentRef, event) {
   const args = createElement(documentRef, "div", "event-args");
   const effectiveArgs = Array.isArray(event.args) ? event.args : [];
   const originalArgs = Array.isArray(event.argsBefore) ? event.argsBefore : [];
+  const captures = Array.isArray(event.captures) ? event.captures : [];
   const count = Math.max(6, effectiveArgs.length, originalArgs.length);
   for (let index = 0; index < count; index += 1) {
     const before = originalArgs[index];
     const after = effectiveArgs[index];
     const changed = Boolean(before && after && before !== after);
-    const arg = createElement(documentRef, "div", changed ? "event-arg event-arg--changed" : "event-arg");
+    const argumentCaptures = captures
+      .filter((capture) => Number(capture?.argIndex) === index);
+    const classes = ["event-arg"];
+    if (changed) classes.push("event-arg--changed");
+    if (argumentCaptures.length > 0) classes.push("event-arg--captured");
+    const arg = createElement(documentRef, "div", classes.join(" "));
     const value = changed ? `${before} -> ${after}` : (after || before || "-");
     arg.append(
       createElement(documentRef, "span", "event-arg-label", `x${index}`),
       createElement(documentRef, "span", "event-arg-value", value),
     );
+    argumentCaptures.forEach((capture) => {
+      const formatted = formatCapture(capture);
+      const decoded = createElement(documentRef, "div", "event-arg-capture");
+      decoded.append(
+        createElement(documentRef, "span", "event-capture-kind", formatted.label),
+        createElement(documentRef, "code", "event-capture-value", formatted.value),
+        createElement(documentRef, "span", "event-capture-meta", formatted.meta),
+      );
+      arg.append(decoded);
+    });
     args.append(arg);
   }
   argsSection.append(args);

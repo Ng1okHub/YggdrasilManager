@@ -22,6 +22,8 @@ class RootSyscallEvent(
     val argsAfter: LongArray,
     val returnBefore: Long,
     val returnAfter: Long,
+    val captureCount: Int,
+    val capturePayload: ByteArray,
     val relayDropped: Long,
 ) : Parcelable {
     private constructor(source: Parcel) : this(
@@ -42,6 +44,8 @@ class RootSyscallEvent(
         argsAfter = source.createLongArray() ?: LongArray(0),
         returnBefore = source.readLong(),
         returnAfter = source.readLong(),
+        captureCount = source.readInt(),
+        capturePayload = source.createByteArray() ?: ByteArray(0),
         relayDropped = source.readLong(),
     )
 
@@ -63,6 +67,8 @@ class RootSyscallEvent(
         dest.writeLongArray(argsAfter)
         dest.writeLong(returnBefore)
         dest.writeLong(returnAfter)
+        dest.writeInt(captureCount)
+        dest.writeByteArray(capturePayload)
         dest.writeLong(relayDropped)
     }
 

@@ -1,5 +1,7 @@
 package ng1ok.yggdrasilmanager
 
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.int
@@ -7,6 +9,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import ng1ok.yggdrasilmanager.data.model.SyscallCapture
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerState
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerStatus
@@ -190,6 +193,26 @@ class SyscallProtocolTest {
         val uid = state.getValue("rules").jsonArray[1].jsonObject
         assertEquals(SyscallObserveRule.MAX_UID, uid.getValue("targetId").jsonPrimitive.long)
 
+        val captureData = byteArrayOf(
+            'o'.code.toByte(),
+            'k'.code.toByte(),
+            '\n'.code.toByte(),
+            0xff.toByte(),
+        )
+        val capturePayload = ByteBuffer.allocate(40).order(ByteOrder.LITTLE_ENDIAN).apply {
+            putShort(40)
+            put(1)
+            put(SyscallCapture.KIND_BYTES.toByte())
+            put(SyscallEvent.PHASE_EXIT.toByte())
+            put(SyscallCapture.POINTER_EFFECTIVE.toByte())
+            putShort(SyscallCapture.SCHEMA_NONE.toShort())
+            putInt(SyscallCapture.STATUS_TRUNCATED)
+            putInt(8)
+            putInt(captureData.size)
+            putInt(0)
+            putLong(-1)
+            put(captureData)
+        }.array()
         val event = json.parseToJsonElement(
             encodeSyscallEvent(
                 SyscallEvent(
@@ -210,6 +233,8 @@ class SyscallProtocolTest {
                     argsAfter = listOf(3L, Long.MIN_VALUE),
                     returnBefore = -4095L,
                     returnAfter = -1L,
+                    captureCount = 1,
+                    capturePayload = capturePayload,
                     relayDropped = 3,
                 ),
             ),
@@ -232,6 +257,17 @@ class SyscallProtocolTest {
         )
         assertEquals("0xfffffffffffff001", event.getValue("returnBefore").jsonPrimitive.content)
         assertEquals("0xffffffffffffffff", event.getValue("return").jsonPrimitive.content)
+        val capture = event.getValue("captures").jsonArray.single().jsonObject
+        assertEquals(1, capture.getValue("argIndex").jsonPrimitive.int)
+        assertEquals("bytes", capture.getValue("kind").jsonPrimitive.content)
+        assertEquals("none", capture.getValue("schema").jsonPrimitive.content)
+        assertEquals("exit", capture.getValue("phase").jsonPrimitive.content)
+        assertEquals("effective", capture.getValue("source").jsonPrimitive.content)
+        assertEquals("0xffffffffffffffff", capture.getValue("address").jsonPrimitive.content)
+        assertEquals(4L, capture.getValue("capturedLength").jsonPrimitive.long)
+        assertEquals(8L, capture.getValue("originalLength").jsonPrimitive.long)
+        assertEquals("truncated", capture.getValue("status").jsonPrimitive.content)
+        assertEquals("\"ok\\n\\xff\"", capture.getValue("value").jsonPrimitive.content)
         assertTrue(event.getValue("afterDropped").jsonPrimitive.boolean)
         assertEquals("0x3", event.getValue("relayDropped").jsonPrimitive.content)
 

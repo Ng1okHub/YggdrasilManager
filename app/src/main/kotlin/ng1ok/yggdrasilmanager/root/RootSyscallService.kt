@@ -69,6 +69,8 @@ class RootSyscallService : RootService() {
             argsAfter: LongArray,
             returnBefore: Long,
             returnAfter: Long,
+            captureCount: Int,
+            capturePayload: ByteArray,
         ) {
             val pendingRelayDrops = relayDropped.getAndSet(0)
             val event = RootSyscallEvent(
@@ -89,6 +91,8 @@ class RootSyscallService : RootService() {
                     argsAfter = argsAfter,
                     returnBefore = returnBefore,
                     returnAfter = returnAfter,
+                    captureCount = captureCount,
+                    capturePayload = capturePayload,
                     relayDropped = pendingRelayDrops,
                 )
             if (eventQueue.trySend(event).isFailure) {

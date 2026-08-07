@@ -6,6 +6,7 @@ import {
   MAX_UID,
   createObserveCommand,
   createUnobserveCommand,
+  formatCapture,
   formatReturn,
   initialModel,
   reduceServerMessage,
@@ -54,6 +55,7 @@ test("an exit pairs with its matching entry and preserves entry arguments", () =
     exitSeq: "0x11",
     argsBefore: ["0x1"],
     args: ["0x2"],
+    captures: [],
     afterDropped: true,
   });
 });
@@ -71,6 +73,40 @@ test("unmatched exits remain visible as independent records", () => {
   assert.equal(model.events[0].phase, "exit");
   assert.equal(model.events[0].displayId, 1);
   assert.equal(model.nextDisplayId, 2);
+});
+
+test("paired calls retain decoded captures from enter and exit", () => {
+  const entryCapture = {
+    argIndex: 1,
+    phase: "enter",
+    kind: "cstring",
+    schema: "none",
+    value: '"/data/local/tmp/file"',
+  };
+  const exitCapture = {
+    argIndex: 4,
+    phase: "exit",
+    kind: "struct",
+    schema: "statx",
+    value: "{size=42}",
+  };
+  let model = reduceServerMessage(initialModel(), event({
+    phase: "enter",
+    callId: "0x88",
+    tid: 7,
+    syscallNr: 291,
+    captures: [entryCapture],
+  }));
+
+  model = reduceServerMessage(model, event({
+    phase: "exit",
+    callId: "0x88",
+    tid: 7,
+    syscallNr: 291,
+    captures: [exitCapture],
+  }));
+
+  assert.deepEqual(model.events[0].captures, [entryCapture, exitCapture]);
 });
 
 test("state carries reader health without clearing the call history", () => {
@@ -218,6 +254,27 @@ test("return formatter exposes kernel errno values while preserving u64 text", (
   assert.equal(formatReturn("0x0000000000000001"), "0x0000000000000001");
   assert.equal(formatReturn("invalid"), "invalid");
   assert.equal(formatReturn(null), "-");
+});
+
+test("capture formatter keeps decoded values and partial status visible", () => {
+  assert.deepEqual(
+    formatCapture({
+      kind: "struct",
+      schema: "sockaddr",
+      phase: "enter",
+      capturedLength: 16,
+      originalLength: 28,
+      status: "truncated|budget",
+      address: "0xffff00001234",
+      value: "{family=AF_INET address=127.0.0.1 port=443}",
+    }),
+    {
+      label: "enter | sockaddr",
+      value: "{family=AF_INET address=127.0.0.1 port=443}",
+      meta: "16/28 B | truncated|budget | 0xffff00001234",
+    },
+  );
+  assert.equal(formatCapture({ status: "fault" }).value, "<fault>");
 });
 
 function event(overrides = {}) {

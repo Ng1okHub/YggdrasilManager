@@ -80,6 +80,8 @@ interface SyscallEventCallback {
         argsAfter: LongArray,
         returnBefore: Long,
         returnAfter: Long,
+        captureCount: Int,
+        capturePayload: ByteArray,
     )
 
     fun onListenerFailure(error: Int)

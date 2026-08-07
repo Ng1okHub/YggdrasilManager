@@ -156,6 +156,22 @@ internal fun encodeSyscallEvent(event: SyscallEvent): String = buildJsonObject {
     put("args", buildJsonArray {
         event.argsAfter.forEach { add(JsonPrimitive(it.toHexValue())) }
     })
+    put("captures", buildJsonArray {
+        event.captures.forEach { capture ->
+            add(buildJsonObject {
+                put("argIndex", capture.argIndex)
+                put("kind", capture.kindName)
+                put("schema", capture.schemaName)
+                put("phase", capture.phaseName)
+                put("source", capture.pointerSourceName)
+                put("address", capture.address.toHexValue())
+                put("capturedLength", capture.capturedLength)
+                put("originalLength", capture.originalLength)
+                put("status", capture.statusName)
+                put("value", capture.value?.let(::JsonPrimitive) ?: JsonNull)
+            })
+        }
+    })
     if (event.phase == SyscallEvent.PHASE_EXIT) {
         put("returnBefore", event.returnBefore.toHexValue())
         put("return", event.returnAfter.toHexValue())

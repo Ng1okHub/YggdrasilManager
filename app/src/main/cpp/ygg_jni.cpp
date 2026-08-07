@@ -6,6 +6,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <android/log.h>
+#include <algorithm>
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
@@ -49,12 +50,148 @@ static_assert(sizeof(struct ygg_syscall_rule_request) ==
 static_assert(sizeof(struct ygg_syscall_event) ==
                   YGG_SYSCALL_EVENT_HEADER_SIZE,
               "unexpected syscall event ABI layout");
+static_assert(sizeof(struct ygg_syscall_capture_tlv) ==
+                  YGG_SYSCALL_CAPTURE_TLV_SIZE,
+              "unexpected syscall capture ABI layout");
 static_assert(sizeof(struct ygg_syscall_event_record) ==
                   YGG_SYSCALL_EVENT_SIZE_MAX,
               "unexpected syscall event record ABI layout");
 static_assert(sizeof(struct ygg_syscall_read_event_request) ==
                   YGG_SYSCALL_READ_REQUEST_SIZE,
               "unexpected syscall read ABI layout");
+
+/* Keep this table in lockstep with yggdrasil_client.cpp's automatic schema. */
+struct syscall_capture_template {
+    uint8_t arg_index;
+    uint8_t phase_mask;
+    uint8_t kind;
+    uint8_t length_source;
+    uint8_t length_arg;
+    uint16_t flags;
+    uint16_t schema_id;
+    uint32_t fixed_length;
+    uint32_t max_length;
+};
+
+struct arm64_syscall_schema {
+    uint32_t nr;
+    uint8_t capture_count;
+    syscall_capture_template captures[2];
+};
+
+static const arm64_syscall_schema kArm64SyscallSchemas[] = {
+    { 56, 1, {
+        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_CSTRING,
+          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0, 0, YGG_SYSCALL_SCHEMA_NONE,
+          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
+    } },
+    { 63, 1, {
+        { 1, YGG_SYSCALL_CAPTURE_PHASE_EXIT, YGG_SYSCALL_CAPTURE_BYTES,
+          YGG_SYSCALL_CAPTURE_LENGTH_ARG_RETURN_MIN, 2,
+          YGG_SYSCALL_CAPTURE_F_SUCCESS_ONLY, YGG_SYSCALL_SCHEMA_NONE,
+          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
+    } },
+    { 64, 1, {
+        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_BYTES,
+          YGG_SYSCALL_CAPTURE_LENGTH_ARG, 2, 0, YGG_SYSCALL_SCHEMA_NONE,
+          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
+    } },
+    { 67, 1, {
+        { 1, YGG_SYSCALL_CAPTURE_PHASE_EXIT, YGG_SYSCALL_CAPTURE_BYTES,
+          YGG_SYSCALL_CAPTURE_LENGTH_ARG_RETURN_MIN, 2,
+          YGG_SYSCALL_CAPTURE_F_SUCCESS_ONLY, YGG_SYSCALL_SCHEMA_NONE,
+          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
+    } },
+    { 68, 1, {
+        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_BYTES,
+          YGG_SYSCALL_CAPTURE_LENGTH_ARG, 2, 0, YGG_SYSCALL_SCHEMA_NONE,
+          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
+    } },
+    { 113, 1, {
+        { 1, YGG_SYSCALL_CAPTURE_PHASE_EXIT, YGG_SYSCALL_CAPTURE_STRUCT,
+          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0,
+          YGG_SYSCALL_CAPTURE_F_SUCCESS_ONLY,
+          YGG_SYSCALL_SCHEMA_TIMESPEC64, 16, 16 },
+    } },
+    { 200, 1, {
+        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_STRUCT,
+          YGG_SYSCALL_CAPTURE_LENGTH_ARG, 2, 0,
+          YGG_SYSCALL_SCHEMA_SOCKADDR, 0, 128 },
+    } },
+    { 203, 1, {
+        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_STRUCT,
+          YGG_SYSCALL_CAPTURE_LENGTH_ARG, 2, 0,
+          YGG_SYSCALL_SCHEMA_SOCKADDR, 0, 128 },
+    } },
+    { 221, 1, {
+        { 0, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_CSTRING,
+          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0, 0, YGG_SYSCALL_SCHEMA_NONE,
+          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
+    } },
+    { 291, 2, {
+        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_CSTRING,
+          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0, 0, YGG_SYSCALL_SCHEMA_NONE,
+          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
+        { 4, YGG_SYSCALL_CAPTURE_PHASE_EXIT, YGG_SYSCALL_CAPTURE_STRUCT,
+          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0,
+          YGG_SYSCALL_CAPTURE_F_SUCCESS_ONLY, YGG_SYSCALL_SCHEMA_STATX,
+          256, 256 },
+    } },
+    { 437, 2, {
+        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_CSTRING,
+          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0, 0, YGG_SYSCALL_SCHEMA_NONE,
+          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
+        { 2, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_STRUCT,
+          YGG_SYSCALL_CAPTURE_LENGTH_ARG, 3, 0,
+          YGG_SYSCALL_SCHEMA_OPEN_HOW, 0, 64 },
+    } },
+};
+
+static const arm64_syscall_schema *find_arm64_syscall_schema(uint32_t nr) {
+    for (const auto &schema : kArm64SyscallSchemas) {
+        if (schema.nr == nr) return &schema;
+    }
+    return nullptr;
+}
+
+static void populate_auto_capture_descriptors(
+        uint32_t syscall_nr, uint32_t trace_flags,
+        ygg_syscall_rule_request *request) {
+    if (!request) return;
+    request->capture_count = 0;
+    request->capture_total_limit = 0;
+
+    const arm64_syscall_schema *schema = find_arm64_syscall_schema(syscall_nr);
+    if (!schema) return;
+    uint8_t enabled_phases = 0;
+    if (trace_flags & YGG_SYSCALL_F_TRACE_ENTER)
+        enabled_phases |= YGG_SYSCALL_CAPTURE_PHASE_ENTER;
+    if (trace_flags & YGG_SYSCALL_F_TRACE_EXIT)
+        enabled_phases |= YGG_SYSCALL_CAPTURE_PHASE_EXIT;
+
+    for (uint8_t i = 0; i < schema->capture_count; ++i) {
+        const syscall_capture_template &source = schema->captures[i];
+        if (!(source.phase_mask & enabled_phases) ||
+            request->capture_count >= YGG_SYSCALL_CAPTURE_COUNT_MAX) {
+            continue;
+        }
+        ygg_syscall_capture_desc &dest =
+                request->captures[request->capture_count++];
+        dest.arg_index = source.arg_index;
+        dest.phase_mask = source.phase_mask & enabled_phases;
+        dest.kind = source.kind;
+        dest.length_source = source.length_source;
+        dest.length_arg = source.length_arg;
+        dest.pointer_source = YGG_SYSCALL_CAPTURE_POINTER_EFFECTIVE;
+        dest.flags = source.flags;
+        dest.schema_id = source.schema_id;
+        dest.fixed_length = source.fixed_length;
+        dest.max_length = std::min(source.max_length,
+                                   YGG_SYSCALL_CAPTURE_PAYLOAD_MAX);
+    }
+    if (request->capture_count > 0)
+        request->capture_total_limit = YGG_SYSCALL_CAPTURE_PAYLOAD_MAX;
+}
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
     g_jvm = vm;
@@ -151,6 +288,7 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallConfigure(
             return -EINVAL;
         }
         req.flags = request_flags;
+        populate_auto_capture_descriptors(req.syscall_nr, req.flags, &req);
     } else {
         if (request_flags & ~selector_flags) {
             return -EINVAL;
@@ -158,7 +296,15 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallConfigure(
         req.flags = request_flags;
     }
 
-    const long ret = prctl(PR_YGGDRASIL_SYSCALL_CONFIG, &req, 0, 0, 0);
+    long ret = prctl(PR_YGGDRASIL_SYSCALL_CONFIG, &req, 0, 0, 0);
+    if (ret < 0 && errno == EOPNOTSUPP && req.capture_count > 0) {
+        YGG_SLOGW("capture unavailable for syscall %u; retrying numeric-only rule",
+                  req.syscall_nr);
+        req.capture_count = 0;
+        req.capture_total_limit = 0;
+        memset(req.captures, 0, sizeof(req.captures));
+        ret = prctl(PR_YGGDRASIL_SYSCALL_CONFIG, &req, 0, 0, 0);
+    }
     return (jint)(ret < 0 ? -errno : 0);
 }
 
@@ -391,6 +537,27 @@ static void *syscall_listen_thread(void *) {
             env->DeleteLocalRef(args_after);
             continue;
         }
+        jbyteArray capture_payload = env->NewByteArray((jsize)event->payload_size);
+        if (!capture_payload) {
+            env->ExceptionClear();
+            env->DeleteLocalRef(comm);
+            env->DeleteLocalRef(args_before);
+            env->DeleteLocalRef(args_after);
+            continue;
+        }
+        if (event->payload_size > 0) {
+            env->SetByteArrayRegion(
+                capture_payload, 0, (jsize)event->payload_size,
+                reinterpret_cast<const jbyte *>(record.payload));
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                env->DeleteLocalRef(comm);
+                env->DeleteLocalRef(args_before);
+                env->DeleteLocalRef(args_after);
+                env->DeleteLocalRef(capture_payload);
+                continue;
+            }
+        }
 
         const uint32_t target_id =
             (event->rule_flags & YGG_SYSCALL_F_TARGET_UID) ?
@@ -403,12 +570,14 @@ static void *syscall_listen_thread(void *) {
             (jint)event->rule_flags, (jlong)target_id,
             comm, (jlong)event->user_cookie, (jlong)event->arg_mask,
             args_before, args_after,
-            (jlong)event->return_before, (jlong)event->return_after);
+            (jlong)event->return_before, (jlong)event->return_after,
+            (jint)event->capture_count, capture_payload);
         if (env->ExceptionCheck()) env->ExceptionClear();
 
         env->DeleteLocalRef(comm);
         env->DeleteLocalRef(args_before);
         env->DeleteLocalRef(args_after);
+        env->DeleteLocalRef(capture_payload);
     }
 
     if (listener_error && !g_syscall_stop.exchange(true)) {
@@ -451,7 +620,7 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallStartListen(
     jmethodID on_event_mid = env->GetMethodID(
         cls,
         "onEvent",
-        "(JJJIIIIIIJLjava/lang/String;JJ[J[JJJ)V");
+        "(JJJIIIIIIJLjava/lang/String;JJ[J[JJJI[B)V");
     if (!on_event_mid) {
         if (env->ExceptionCheck()) env->ExceptionClear();
         env->DeleteLocalRef(cls);

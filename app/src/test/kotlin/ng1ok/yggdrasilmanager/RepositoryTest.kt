@@ -186,6 +186,43 @@ class RepositoryTest {
     }
 
     @Test
+    fun syscallEventsRetainValidatedCapturePayload() = runTest {
+        val callback = slot<SyscallEventCallback>()
+        every { mockNative.syscallStartListen(capture(callback)) } returns 0
+        val payload = byteArrayOf(0x20, 0, 1, 1, 1, 2, 0, 0)
+        val expectedPayload = payload.copyOf()
+
+        repo.startSyscallEventStream()
+        callback.captured.onEvent(
+            seq = 1,
+            dropped = 0,
+            callId = 2,
+            phase = 1,
+            tid = 1234,
+            tgid = 1234,
+            syscallNr = 56,
+            eventFlags = 1 shl 3,
+            ruleFlags = 1 shl 1,
+            targetId = 1234,
+            comm = "target",
+            userCookie = 0,
+            argMask = 0,
+            argsBefore = LongArray(6),
+            argsAfter = LongArray(6),
+            returnBefore = 0,
+            returnAfter = 0,
+            captureCount = 1,
+            capturePayload = payload,
+        )
+        payload.fill(0)
+
+        val event = withTimeout(1_000) { repo.syscallEvents.take(1).toList().single() }
+
+        assertEquals(1, event.captureCount)
+        assertTrue(expectedPayload.contentEquals(event.capturePayload))
+    }
+
+    @Test
     fun setHideDbg_global_callsNativeWithoutUid() = runTest {
         every { mockNative.hideDbg(any(), any(), any()) } returns 0
         repo.setHideDbg(enable = true, uid = null)
