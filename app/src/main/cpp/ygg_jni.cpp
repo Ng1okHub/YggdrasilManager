@@ -137,14 +137,6 @@ static const arm64_syscall_schema kArm64SyscallSchemas[] = {
           YGG_SYSCALL_CAPTURE_F_SUCCESS_ONLY, YGG_SYSCALL_SCHEMA_STATX,
           256, 256 },
     } },
-    { 437, 2, {
-        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_CSTRING,
-          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0, 0, YGG_SYSCALL_SCHEMA_NONE,
-          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
-        { 2, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_STRUCT,
-          YGG_SYSCALL_CAPTURE_LENGTH_ARG, 3, 0,
-          YGG_SYSCALL_SCHEMA_OPEN_HOW, 0, 64 },
-    } },
 };
 
 static const arm64_syscall_schema *find_arm64_syscall_schema(uint32_t nr) {
@@ -209,6 +201,21 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_checkAvailable(JNIEnv *, jobj
 extern "C" JNIEXPORT jlong JNICALL
 Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_getVersion(JNIEnv *, jobject) {
     return static_cast<jlong>(prctl(PR_YGGDRASIL_GET_VERSION, 0, 0, 0, 0));
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallCaptureSupportedNumbers(
+        JNIEnv *env, jobject) {
+    std::vector<jint> numbers;
+    numbers.reserve(sizeof(kArm64SyscallSchemas) / sizeof(kArm64SyscallSchemas[0]));
+    for (const auto &schema : kArm64SyscallSchemas) {
+        numbers.push_back(static_cast<jint>(schema.nr));
+    }
+
+    jintArray result = env->NewIntArray(static_cast<jsize>(numbers.size()));
+    if (!result) return nullptr;
+    env->SetIntArrayRegion(result, 0, static_cast<jsize>(numbers.size()), numbers.data());
+    return result;
 }
 
 extern "C" JNIEXPORT jint JNICALL

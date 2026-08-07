@@ -33,9 +33,10 @@
           <form id="rule-form" novalidate>
             <label class="field">
               <span>Syscall編號</span>
-              <input id="syscall-nr" name="syscallNr" type="number" min="0" max="459" step="1" inputmode="numeric" required>
+              <select id="syscall-nr" name="syscallNr" required disabled>
+                <option value="">正在讀取支援清單</option>
+              </select>
             </label>
-            <p id="syscall-name" class="field-hint" aria-live="polite"></p>
 
             <label class="field">
               <span>範圍</span>
@@ -45,10 +46,39 @@
                 <option value="uid">App（UID）</option>
               </select>
             </label>
-            <label class="field" id="target-field">
+            <label class="field" id="numeric-target-field">
               <span id="target-label">Process ID（TGID）</span>
               <input id="target-id" name="targetId" type="number" min="1" max="2147483647" step="1" inputmode="numeric" required>
             </label>
+            <div id="package-target-field" class="package-target" hidden>
+              <div class="field">
+                <label for="package-search">目標 App</label>
+                <div id="package-combobox" class="package-combobox">
+                  <div class="package-combobox-control">
+                    <input
+                      id="package-search"
+                      type="search"
+                      role="combobox"
+                      aria-autocomplete="list"
+                      aria-haspopup="listbox"
+                      aria-expanded="false"
+                      aria-controls="package-options"
+                      aria-describedby="package-status"
+                      autocomplete="off"
+                      autocapitalize="none"
+                      spellcheck="false"
+                      placeholder="搜尋包名或 App 名稱"
+                      disabled
+                    >
+                  </div>
+                  <div id="package-options" class="package-options" role="listbox" aria-label="可觀察的 App" hidden></div>
+                </div>
+              </div>
+              <div class="package-feedback">
+                <p id="package-status" class="package-status" aria-live="polite"></p>
+                <button id="reload-apps" class="button button--quiet package-reload" type="button" hidden>重新載入</button>
+              </div>
+            </div>
 
             <fieldset class="phase-field">
               <legend>觀察階段</legend>

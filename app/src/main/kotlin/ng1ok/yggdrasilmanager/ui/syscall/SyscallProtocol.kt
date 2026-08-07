@@ -12,6 +12,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
+import ng1ok.yggdrasilmanager.data.model.Arm64SyscallCatalog
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerStatus
 import ng1ok.yggdrasilmanager.data.model.SyscallObserveRule
@@ -110,23 +112,57 @@ private fun JsonObject.requiredPhase(name: String): SyscallTracePhase = when (
 internal fun encodeSyscallState(
     rules: List<SyscallObserveRule>,
     listenerStatus: SyscallListenerStatus = SyscallListenerStatus(),
+    supportedSyscalls: List<Int> = emptyList(),
 ): String = buildJsonObject {
     put("type", "state")
     put("listener", buildJsonObject {
         put("state", listenerStatus.state.wireName)
         put("error", listenerStatus.error?.let(::JsonPrimitive) ?: JsonNull)
     })
+    put("supportedSyscalls", buildJsonArray {
+        supportedSyscalls
+            .asSequence()
+            .filter { it in 0 until 460 }
+            .distinct()
+            .sorted()
+            .forEach { syscallNr ->
+                add(buildJsonObject {
+                    put("nr", syscallNr)
+                    put("name", Arm64SyscallCatalog.nameFor(syscallNr))
+                })
+            }
+    })
     put("rules", buildJsonArray {
         rules.forEach { rule ->
             add(buildJsonObject {
                 put("syscallNr", rule.syscallNr)
-                put("name", ng1ok.yggdrasilmanager.data.model.Arm64SyscallCatalog.nameFor(rule.syscallNr))
+                put("name", Arm64SyscallCatalog.nameFor(rule.syscallNr))
                 put("scope", rule.scope.wireName)
                 put("targetId", rule.targetId)
                 put("phase", rule.phase.wireName)
             })
         }
     })
+}.toString()
+
+internal fun encodeInstalledApps(apps: List<InstalledApp>): String = buildJsonObject {
+    put("apps", buildJsonArray {
+        apps.forEach { app ->
+            add(buildJsonObject {
+                put("packageName", app.packageName)
+                put("label", app.label)
+                put("uid", app.uid)
+                put("isSystem", app.isSystem)
+            })
+        }
+    })
+}.toString()
+
+internal fun encodeInstalledAppsError(error: Throwable): String = buildJsonObject {
+    put(
+        "error",
+        error.message?.takeIf(String::isNotBlank) ?: "無法讀取已安裝套件",
+    )
 }.toString()
 
 internal fun encodeSyscallEvent(event: SyscallEvent): String = buildJsonObject {

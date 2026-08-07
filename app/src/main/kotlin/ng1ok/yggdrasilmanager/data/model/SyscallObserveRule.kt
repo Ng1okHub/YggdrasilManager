@@ -183,8 +183,6 @@ object Arm64SyscallCatalog {
         278 to "getrandom",
         281 to "execveat",
         291 to "statx",
-        435 to "clone3",
-        437 to "openat2",
     )
 
     fun nameFor(syscallNr: Int): String = names[syscallNr] ?: "syscall_$syscallNr"

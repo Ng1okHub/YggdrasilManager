@@ -25,6 +25,7 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerStatus
 import ng1ok.yggdrasilmanager.data.model.SyscallObserveRule
@@ -76,6 +77,77 @@ class SyscallWebServerTest {
     }
 
     @Test
+    fun installedAppsEndpointRequiresTokenAndPreservesSharedUidPackages() = testApplication {
+        var loadCount = 0
+        val apps = listOf(
+            InstalledApp("com.example.alpha", "Alpha", 10_123, isSystem = false),
+            InstalledApp("com.example.shared", "Shared", 10_123, isSystem = true),
+        )
+        application {
+            installSyscallWebRoutes(
+                bindings = emptyBindings(
+                    installedApps = {
+                        loadCount += 1
+                        Result.success(apps)
+                    },
+                ),
+                assetLoader = { null },
+                hub = SyscallClientHub(),
+                accessToken = accessToken,
+            )
+        }
+
+        val denied = client.get("/api/apps")
+        val response = client.get("/api/apps?token=$accessToken")
+
+        assertEquals(HttpStatusCode.Forbidden, denied.status)
+        assertEquals(1, loadCount)
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals("application/json; charset=UTF-8", response.headers["Content-Type"])
+        val encodedApps = json.parseToJsonElement(response.bodyAsText())
+            .jsonObject
+            .getValue("apps")
+            .jsonArray
+            .map { it.jsonObject }
+        assertEquals(2, encodedApps.size)
+        assertEquals("com.example.alpha", encodedApps[0].getValue("packageName").jsonPrimitive.content)
+        assertEquals("Alpha", encodedApps[0].getValue("label").jsonPrimitive.content)
+        assertEquals(10_123, encodedApps[0].getValue("uid").jsonPrimitive.int)
+        assertFalse(encodedApps[0].getValue("isSystem").jsonPrimitive.boolean)
+        assertEquals("com.example.shared", encodedApps[1].getValue("packageName").jsonPrimitive.content)
+        assertEquals("Shared", encodedApps[1].getValue("label").jsonPrimitive.content)
+        assertEquals(10_123, encodedApps[1].getValue("uid").jsonPrimitive.int)
+        assertTrue(encodedApps[1].getValue("isSystem").jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun installedAppsEndpointReturnsJsonErrorWhenLoadingFails() = testApplication {
+        application {
+            installSyscallWebRoutes(
+                bindings = emptyBindings(
+                    installedApps = {
+                        Result.failure(IllegalStateException("package manager unavailable"))
+                    },
+                ),
+                assetLoader = { null },
+                hub = SyscallClientHub(),
+                accessToken = accessToken,
+            )
+        }
+
+        val response = client.get("/api/apps?token=$accessToken")
+
+        assertEquals(HttpStatusCode.InternalServerError, response.status)
+        assertEquals("application/json; charset=UTF-8", response.headers["Content-Type"])
+        val error = json.parseToJsonElement(response.bodyAsText())
+            .jsonObject
+            .getValue("error")
+            .jsonPrimitive
+            .content
+        assertEquals("package manager unavailable", error)
+    }
+
+    @Test
     fun validTokenWebSocketReceivesTheInitialRuleState() = testApplication {
         val rule = SyscallObserveRule(
             63,
@@ -85,7 +157,10 @@ class SyscallWebServerTest {
         )
         application {
             installSyscallWebRoutes(
-                bindings = emptyBindings(rules = { listOf(rule) }),
+                bindings = emptyBindings(
+                    rules = { listOf(rule) },
+                    supportedSyscalls = listOf(64, 56),
+                ),
                 assetLoader = { null },
                 hub = SyscallClientHub(),
                 accessToken = accessToken,
@@ -101,6 +176,15 @@ class SyscallWebServerTest {
         assertEquals("uid", encodedRule.getValue("scope").jsonPrimitive.content)
         assertEquals(SyscallObserveRule.MAX_UID, encodedRule.getValue("targetId").jsonPrimitive.long)
         assertEquals("both", encodedRule.getValue("phase").jsonPrimitive.content)
+        val supportedSyscalls = state.getValue("supportedSyscalls").jsonArray.map { it.jsonObject }
+        assertEquals(
+            listOf(56, 64),
+            supportedSyscalls.map { it.getValue("nr").jsonPrimitive.int },
+        )
+        assertEquals(
+            listOf("openat", "write"),
+            supportedSyscalls.map { it.getValue("name").jsonPrimitive.content },
+        )
 
         session.close(CloseReason(CloseReason.Codes.NORMAL, "done"))
     }
@@ -228,6 +312,8 @@ class SyscallWebServerTest {
         events: Flow<SyscallEvent> = emptyFlow(),
         rules: () -> List<SyscallObserveRule> = { emptyList() },
         listenerStatus: StateFlow<SyscallListenerStatus> = MutableStateFlow(SyscallListenerStatus()),
+        supportedSyscalls: List<Int> = emptyList(),
+        installedApps: suspend () -> Result<List<InstalledApp>> = { Result.success(emptyList()) },
         observe: suspend (SyscallObserveRule) -> Result<Unit> = { Result.success(Unit) },
         unobserve: suspend (SyscallObserveRule) -> Result<Unit> = { Result.success(Unit) },
         restartListener: () -> Unit = {},
@@ -235,6 +321,8 @@ class SyscallWebServerTest {
         events = events,
         rules = rules,
         listenerStatus = listenerStatus,
+        supportedSyscalls = supportedSyscalls,
+        installedApps = installedApps,
         observe = observe,
         unobserve = unobserve,
         restartListener = restartListener,

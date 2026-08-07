@@ -11,6 +11,7 @@ interface YggdrasilNativeApi {
     fun hwbpStartListen(callback: HwbpEventCallback)
     fun hwbpStopListen()
     fun syscallConfigure(op: Int, flags: Int, syscallNr: Int, targetId: Long): Int
+    fun syscallCaptureSupportedNumbers(): IntArray
     fun syscallStartListen(callback: SyscallEventCallback): Int
     fun syscallStopListen()
     fun hideDbg(enable: Boolean, hasUid: Boolean, uid: Int): Int
@@ -99,6 +100,7 @@ object YggdrasilNative : YggdrasilNativeApi {
     external override fun hwbpStartListen(callback: HwbpEventCallback)
     external override fun hwbpStopListen()
     external override fun syscallConfigure(op: Int, flags: Int, syscallNr: Int, targetId: Long): Int
+    external override fun syscallCaptureSupportedNumbers(): IntArray
     external override fun syscallStartListen(callback: SyscallEventCallback): Int
     external override fun syscallStopListen()
     external override fun hideDbg(enable: Boolean, hasUid: Boolean, uid: Int): Int

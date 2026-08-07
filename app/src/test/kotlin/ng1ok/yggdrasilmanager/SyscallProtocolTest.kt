@@ -174,6 +174,7 @@ class SyscallProtocolTest {
                     state = SyscallListenerState.FAILED,
                     error = "系統呼叫監聽器已停止（errno 32）",
                 ),
+                supportedSyscalls = listOf(64, 56, 64, -1, 460),
             ),
         ).jsonObject
         val global = state.getValue("rules").jsonArray[0].jsonObject
@@ -184,6 +185,15 @@ class SyscallProtocolTest {
         assertEquals("global", global.getValue("scope").jsonPrimitive.content)
         assertEquals(0L, global.getValue("targetId").jsonPrimitive.long)
         assertEquals("both", global.getValue("phase").jsonPrimitive.content)
+        val supportedSyscalls = state.getValue("supportedSyscalls").jsonArray.map { it.jsonObject }
+        assertEquals(
+            listOf(56, 64),
+            supportedSyscalls.map { it.getValue("nr").jsonPrimitive.int },
+        )
+        assertEquals(
+            listOf("openat", "write"),
+            supportedSyscalls.map { it.getValue("name").jsonPrimitive.content },
+        )
         val listener = state.getValue("listener").jsonObject
         assertEquals("failed", listener.getValue("state").jsonPrimitive.content)
         assertEquals(

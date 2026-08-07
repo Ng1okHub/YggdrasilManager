@@ -54,6 +54,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.concurrent.withLock
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerStatus
 import ng1ok.yggdrasilmanager.data.model.SyscallObserveRule
@@ -70,6 +71,8 @@ internal data class SyscallServerBindings(
     val events: Flow<SyscallEvent>,
     val rules: () -> List<SyscallObserveRule>,
     val listenerStatus: StateFlow<SyscallListenerStatus>,
+    val supportedSyscalls: List<Int>,
+    val installedApps: suspend () -> Result<List<InstalledApp>>,
     val observe: suspend (SyscallObserveRule) -> Result<Unit>,
     val unobserve: suspend (SyscallObserveRule) -> Result<Unit>,
     val restartListener: () -> Unit,
@@ -193,7 +196,13 @@ internal fun Application.installSyscallWebRoutes(
     launch {
         // A newly connected client receives the current snapshot below.
         bindings.listenerStatus.drop(1).collect { listenerStatus ->
-            hub.broadcast(encodeSyscallState(bindings.rules(), listenerStatus))
+            hub.broadcast(
+                encodeSyscallState(
+                    bindings.rules(),
+                    listenerStatus,
+                    bindings.supportedSyscalls,
+                ),
+            )
         }
     }
     routing {
@@ -203,6 +212,23 @@ internal fun Application.installSyscallWebRoutes(
                 return@get
             }
             call.respondSyscallAsset("index.html", assetLoader)
+        }
+        get("/api/apps") {
+            if (!call.hasSyscallAccess(accessToken)) {
+                call.respond(HttpStatusCode.Forbidden)
+                return@get
+            }
+            bindings.installedApps().fold(
+                onSuccess = { apps ->
+                    call.respondSyscallJson(encodeInstalledApps(apps))
+                },
+                onFailure = { error ->
+                    call.respondSyscallJson(
+                        encodeInstalledAppsError(error),
+                        HttpStatusCode.InternalServerError,
+                    )
+                },
+            )
         }
         get("/static/{path...}") {
             val segments = call.parameters.getAll("path").orEmpty()
@@ -217,7 +243,14 @@ internal fun Application.installSyscallWebRoutes(
                 close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "存取權杖無效"))
                 return@webSocket
             }
-            hub.add(this, encodeSyscallState(bindings.rules(), bindings.listenerStatus.value))
+            hub.add(
+                this,
+                encodeSyscallState(
+                    bindings.rules(),
+                    bindings.listenerStatus.value,
+                    bindings.supportedSyscalls,
+                ),
+            )
             try {
                 for (frame in incoming) {
                     if (frame !is Frame.Text) continue
@@ -236,7 +269,11 @@ internal fun Application.installSyscallWebRoutes(
                     hub.send(this, encodeSyscallAck(result))
                     if (result.isSuccess) {
                         hub.broadcast(
-                            encodeSyscallState(bindings.rules(), bindings.listenerStatus.value),
+                            encodeSyscallState(
+                                bindings.rules(),
+                                bindings.listenerStatus.value,
+                                bindings.supportedSyscalls,
+                            ),
                         )
                     }
                 }
@@ -263,6 +300,17 @@ private suspend fun ApplicationCall.respondSyscallAsset(
         return
     }
     respondBytes(bytes, syscallContentTypeFor(path))
+}
+
+private suspend fun ApplicationCall.respondSyscallJson(
+    text: String,
+    status: HttpStatusCode = HttpStatusCode.OK,
+) {
+    respondBytes(
+        bytes = text.encodeToByteArray(),
+        contentType = ContentType.Application.Json.withCharset(Charsets.UTF_8),
+        status = status,
+    )
 }
 
 private fun syscallContentTypeFor(path: String): ContentType = when {
@@ -364,7 +412,13 @@ internal class SyscallWebServer(
     }
 
     override suspend fun broadcastState() {
-        hub.broadcast(encodeSyscallState(bindings.rules(), bindings.listenerStatus.value))
+        hub.broadcast(
+            encodeSyscallState(
+                bindings.rules(),
+                bindings.listenerStatus.value,
+                bindings.supportedSyscalls,
+            ),
+        )
     }
 
     private suspend fun loadAsset(path: String): ByteArray? = withContext(Dispatchers.IO) {

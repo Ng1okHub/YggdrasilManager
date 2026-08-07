@@ -1,5 +1,6 @@
 package ng1ok.yggdrasilmanager.ui.syscall
 
+import android.os.Process
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.ViewModelProvider.AndroidViewModelFactory.Companion.APPLICATION_KEY
@@ -20,6 +21,7 @@ import kotlinx.coroutines.launch
 import kotlin.concurrent.withLock
 import ng1ok.yggdrasilmanager.App
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledAppsSource
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerState
 import ng1ok.yggdrasilmanager.data.model.SyscallObserveRule
 
@@ -33,6 +35,7 @@ data class SyscallUiState(
 
 class SyscallViewModel internal constructor(
     private val repo: YggdrasilRepository,
+    private val installedAppsSource: InstalledAppsSource,
     serverFactory: SyscallServerFactory,
 ) : ViewModel() {
     val rules: StateFlow<List<SyscallObserveRule>> = repo.syscallRules
@@ -47,11 +50,22 @@ class SyscallViewModel internal constructor(
     val uiState: StateFlow<SyscallUiState>
 
     init {
+        val supportedSyscalls = repo.nativeApi.syscallCaptureSupportedNumbers()
+            .asSequence()
+            .distinct()
+            .sorted()
+            .toList()
         server = serverFactory.create(
             SyscallServerBindings(
                 events = repo.syscallEvents,
                 rules = { rules.value },
                 listenerStatus = repo.syscallListenerStatus,
+                supportedSyscalls = supportedSyscalls,
+                installedApps = {
+                    installedAppsSource.load().map { apps ->
+                        apps.filterNot { app -> app.uid == Process.myUid() }
+                    }
+                },
                 observe = ::observe,
                 unobserve = ::unobserve,
                 restartListener = ::restartListener,
@@ -155,6 +169,7 @@ class SyscallViewModel internal constructor(
                 val application = this[APPLICATION_KEY] as App
                 SyscallViewModel(
                     repo = YggdrasilRepository.instance,
+                    installedAppsSource = application.installedAppsSource,
                     serverFactory = SyscallServerFactory { bindings ->
                         SyscallWebServer(application, bindings)
                     },

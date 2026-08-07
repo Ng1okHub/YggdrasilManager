@@ -47,7 +47,7 @@ const SYSCALL_NAMES = new Map([
   [212, "recvmsg"], [214, "brk"], [215, "munmap"], [220, "clone"],
   [221, "execve"], [222, "mmap"], [226, "mprotect"], [242, "accept4"],
   [260, "wait4"], [261, "prlimit64"], [278, "getrandom"],
-  [281, "execveat"], [291, "statx"], [435, "clone3"], [437, "openat2"],
+  [281, "execveat"], [291, "statx"],
 ]);
 
 export function syscallName(syscallNr) {
@@ -59,6 +59,7 @@ export function initialModel() {
     rules: [],
     events: [],
     listener: { state: "starting", error: null },
+    supportedSyscalls: [],
     nextDisplayId: 1,
   };
 }
@@ -69,6 +70,9 @@ export function reduceServerMessage(model, message) {
       ...model,
       rules: Array.isArray(message.rules) ? [...message.rules] : [],
       listener: normalizeListener(message.listener, model.listener),
+      supportedSyscalls: Array.isArray(message.supportedSyscalls)
+        ? normalizeSupportedSyscalls(message.supportedSyscalls)
+        : model.supportedSyscalls,
     };
   }
   if (message?.type !== "event") return model;
@@ -117,6 +121,20 @@ function normalizeListener(listener, fallback) {
   };
 }
 
+export function normalizeSupportedSyscalls(value) {
+  if (!Array.isArray(value)) return [];
+  const byNumber = new Map();
+  value.forEach((entry) => {
+    const nr = Number(entry?.nr);
+    if (!Number.isSafeInteger(nr) || nr < 0 || nr > 459) return;
+    const name = typeof entry?.name === "string" && entry.name.trim()
+      ? entry.name.trim()
+      : syscallName(nr);
+    byNumber.set(nr, { nr, name });
+  });
+  return [...byNumber.values()].sort((first, second) => first.nr - second.nr);
+}
+
 function findMatchingEntry(events, incoming) {
   if (incoming?.phase !== "exit" || !usableCallId(incoming.callId)) return -1;
   return events.findIndex((event) =>
@@ -137,6 +155,61 @@ export function clearEventsModel(model) {
     events: [],
     nextDisplayId: 1,
   };
+}
+
+export function normalizeInstalledApps(payload) {
+  const source = Array.isArray(payload) ? payload : payload?.apps;
+  if (!Array.isArray(source)) return [];
+
+  const packageNames = new Set();
+  const apps = [];
+  source.forEach((entry) => {
+    const packageName = typeof entry?.packageName === "string"
+      ? entry.packageName.trim()
+      : "";
+    const uid = Number(entry?.uid);
+    if (
+      !packageName ||
+      packageNames.has(packageName) ||
+      !Number.isSafeInteger(uid) ||
+      uid <= 0 ||
+      uid > MAX_UID
+    ) {
+      return;
+    }
+    packageNames.add(packageName);
+    const label = typeof entry?.label === "string" && entry.label.trim()
+      ? entry.label.trim()
+      : packageName;
+    apps.push({
+      packageName,
+      label,
+      uid,
+      isSystem: entry?.isSystem === true,
+    });
+  });
+  return apps.sort((first, second) =>
+    Number(first.isSystem) - Number(second.isSystem) ||
+    first.packageName.localeCompare(second.packageName, undefined, { sensitivity: "base" }),
+  );
+}
+
+export function filterInstalledApps(apps, query) {
+  const normalizedQuery = String(query ?? "").trim().toLowerCase();
+  if (!normalizedQuery) return Array.isArray(apps) ? [...apps] : [];
+  return (Array.isArray(apps) ? apps : []).filter((app) =>
+    app.packageName.toLowerCase().includes(normalizedQuery) ||
+    app.label.toLowerCase().includes(normalizedQuery),
+  );
+}
+
+export function selectedPackageUid(apps, packageName) {
+  const selectedPackage = String(packageName ?? "").trim();
+  const app = (Array.isArray(apps) ? apps : []).find(
+    (candidate) => candidate.packageName === selectedPackage,
+  );
+  if (!app) throw new Error("請先選擇目標 App 包名");
+  return app.uid;
 }
 
 export function createObserveCommand({ syscallNr, scope, targetId, phase }) {
@@ -180,7 +253,9 @@ export function createUnobserveCommand(rule) {
 }
 
 function parseInteger(value, label) {
-  const parsed = typeof value === "number" ? value : Number(String(value).trim());
+  const normalized = typeof value === "number" ? value : String(value).trim();
+  if (normalized === "") throw new Error(`${label}必須為整數`);
+  const parsed = typeof normalized === "number" ? normalized : Number(normalized);
   if (!Number.isSafeInteger(parsed)) throw new Error(`${label}必須為整數`);
   return parsed;
 }
@@ -252,11 +327,16 @@ function setupBrowserClient(documentRef, windowRef) {
     connection: documentRef.getElementById("connection"),
     ruleForm: documentRef.getElementById("rule-form"),
     syscallNr: documentRef.getElementById("syscall-nr"),
-    syscallName: documentRef.getElementById("syscall-name"),
     scope: documentRef.getElementById("scope"),
-    targetField: documentRef.getElementById("target-field"),
+    numericTargetField: documentRef.getElementById("numeric-target-field"),
+    packageTargetField: documentRef.getElementById("package-target-field"),
     targetLabel: documentRef.getElementById("target-label"),
     targetId: documentRef.getElementById("target-id"),
+    packageCombobox: documentRef.getElementById("package-combobox"),
+    packageSearch: documentRef.getElementById("package-search"),
+    packageOptions: documentRef.getElementById("package-options"),
+    packageStatus: documentRef.getElementById("package-status"),
+    reloadApps: documentRef.getElementById("reload-apps"),
     ruleList: documentRef.getElementById("rule-list"),
     ruleCount: documentRef.getElementById("rule-count"),
     eventList: documentRef.getElementById("event-list"),
@@ -270,8 +350,17 @@ function setupBrowserClient(documentRef, windowRef) {
   let socket = null;
   let reconnectTimer = null;
   let pendingAckMessages = [];
+  let installedApps = [];
+  let appsLoadState = "idle";
+  let appsError = null;
+  let selectedPackageName = "";
+  let packageMenuOpen = false;
+  let activePackageIndex = -1;
+  let visiblePackageApps = [];
+  let packageSelectionInvalid = false;
 
   function render() {
+    renderSyscallSelector();
     renderRules(documentRef, elements, model, sendCommand);
     renderEvents(documentRef, elements, model);
     renderListenerStatus(elements, model.listener);
@@ -296,19 +385,338 @@ function setupBrowserClient(documentRef, windowRef) {
     socket.send(JSON.stringify(command));
   }
 
-  function updateScope() {
-    const isUid = elements.scope.value === "uid";
-    elements.targetId.min = "1";
-    elements.targetId.max = String(isUid ? MAX_UID : MAX_PROCESS_ID);
-    elements.targetLabel.textContent = targetLabel(elements.scope.value);
+  function renderSyscallSelector() {
+    const catalog = model.supportedSyscalls;
+    const signature = catalog.map((entry) => `${entry.nr}:${entry.name}`).join("|");
+    if (elements.syscallNr.dataset.catalog === signature) return;
+
+    const currentValue = elements.syscallNr.value;
+    const placeholder = createElement(
+      documentRef,
+      "option",
+      "",
+      catalog.length > 0 ? "選擇 Syscall" : "尚無可用的 Syscall",
+    );
+    placeholder.value = "";
+    placeholder.disabled = true;
+    elements.syscallNr.replaceChildren(placeholder);
+    catalog.forEach((entry) => {
+      const option = createElement(documentRef, "option", "", `${entry.nr} · ${entry.name}`);
+      option.value = String(entry.nr);
+      elements.syscallNr.append(option);
+    });
+    elements.syscallNr.disabled = catalog.length === 0;
+    elements.syscallNr.value = catalog.some((entry) => String(entry.nr) === currentValue)
+      ? currentValue
+      : "";
+    elements.syscallNr.dataset.catalog = signature;
   }
 
-  function updateSyscallName() {
-    const value = elements.syscallNr.value;
-    const nr = Number(value);
-    elements.syscallName.textContent = Number.isInteger(nr) && nr >= 0 && nr <= 459
-      ? `${nr}: ${syscallName(nr)}`
-      : "";
+  function setPackageStatus(message, state = "normal") {
+    elements.packageStatus.textContent = message;
+    elements.packageStatus.classList.toggle("package-status--error", state === "error");
+    elements.packageStatus.classList.toggle("package-status--selected", state === "selected");
+  }
+
+  function packageTypeLabel(app) {
+    return app.isSystem ? "系統" : "使用者";
+  }
+
+  function packageSharedCount(app, packageCountByUid) {
+    return packageCountByUid.get(app.uid) || 0;
+  }
+
+  function packageMatches() {
+    const committedValue = selectedPackageName &&
+      elements.packageSearch.value.trim() === selectedPackageName;
+    return filterInstalledApps(installedApps, committedValue ? "" : elements.packageSearch.value);
+  }
+
+  function syncPackageMenuState() {
+    const isUid = elements.scope.value === "uid";
+    const canOpen = isUid && appsLoadState === "ready";
+    const open = canOpen && packageMenuOpen;
+    elements.packageCombobox.classList.toggle("package-combobox--open", open);
+    elements.packageCombobox.classList.toggle(
+      "package-combobox--invalid",
+      canOpen && packageSelectionInvalid,
+    );
+    elements.packageSearch.setAttribute("aria-expanded", String(open));
+    elements.packageSearch.setAttribute("aria-busy", appsLoadState === "loading" ? "true" : "false");
+    elements.packageSearch.setAttribute("aria-invalid", String(canOpen && packageSelectionInvalid));
+    elements.packageOptions.hidden = !open;
+    if (open && activePackageIndex >= 0 && activePackageIndex < visiblePackageApps.length) {
+      elements.packageSearch.setAttribute(
+        "aria-activedescendant",
+        `package-option-${activePackageIndex}`,
+      );
+      const activeOption = elements.packageOptions.querySelector(
+        `#package-option-${activePackageIndex}`,
+      );
+      activeOption?.scrollIntoView?.({ block: "nearest" });
+    } else {
+      elements.packageSearch.removeAttribute("aria-activedescendant");
+    }
+  }
+
+  function renderPackageOption(app, index, packageCountByUid) {
+    const option = createElement(documentRef, "div", "package-option");
+    const sharedCount = packageSharedCount(app, packageCountByUid);
+    const sharedText = sharedCount > 1 ? `共享 UID（${sharedCount} 個包名）` : "";
+    const typeLabel = packageTypeLabel(app);
+    const typeClass = app.isSystem ? "package-kind--system" : "package-kind--user";
+    const isSelected = app.packageName === selectedPackageName;
+
+    option.id = `package-option-${index}`;
+    option.setAttribute("role", "option");
+    option.setAttribute("aria-selected", String(isSelected));
+    option.setAttribute(
+      "aria-label",
+      `${app.packageName}，${app.label}，UID ${app.uid}，${typeLabel}${sharedText ? `，${sharedText}` : ""}`,
+    );
+    option.dataset.packageName = app.packageName;
+    if (index === activePackageIndex) option.classList.add("package-option--active");
+
+    const primary = createElement(documentRef, "div", "package-option-primary");
+    const packageName = createElement(documentRef, "span", "package-option-name", app.packageName);
+    packageName.title = app.packageName;
+    primary.append(packageName);
+    primary.append(createElement(documentRef, "span", `package-kind ${typeClass}`, typeLabel));
+    option.append(primary);
+
+    const meta = createElement(documentRef, "div", "package-option-meta");
+    meta.append(createElement(documentRef, "span", "package-option-label", app.label));
+    meta.append(createElement(documentRef, "span", "package-option-uid", `UID ${app.uid}`));
+    if (sharedText) meta.append(createElement(documentRef, "span", "package-option-shared", sharedText));
+    option.append(meta);
+    return option;
+  }
+
+  function renderPackageGroup(label, apps, packageCountByUid, startIndex) {
+    if (apps.length === 0) return null;
+    const group = createElement(documentRef, "div", "package-group");
+    group.setAttribute("role", "group");
+    group.setAttribute("aria-label", `${label}（${apps.length}）`);
+    const heading = createElement(documentRef, "div", "package-group-label");
+    heading.append(createElement(documentRef, "span", "", label));
+    heading.append(createElement(documentRef, "span", "", String(apps.length)));
+    group.append(heading);
+    apps.forEach((app, offset) => {
+      group.append(renderPackageOption(app, startIndex + offset, packageCountByUid));
+    });
+    return group;
+  }
+
+  function renderPackageSelector() {
+    const isUid = elements.scope.value === "uid";
+    const isReady = isUid && appsLoadState === "ready";
+    elements.packageSearch.disabled = !isReady;
+    elements.packageSearch.required = isReady;
+    elements.reloadApps.hidden = !isUid || appsLoadState !== "error";
+
+    if (!isUid) {
+      visiblePackageApps = [];
+      packageMenuOpen = false;
+      activePackageIndex = -1;
+      elements.packageOptions.replaceChildren();
+      syncPackageMenuState();
+      return;
+    }
+    if (appsLoadState === "idle" || appsLoadState === "loading") {
+      visiblePackageApps = [];
+      packageMenuOpen = false;
+      activePackageIndex = -1;
+      elements.packageOptions.replaceChildren();
+      setPackageStatus("正在讀取已安裝套件...");
+      syncPackageMenuState();
+      return;
+    }
+    if (appsLoadState === "error") {
+      visiblePackageApps = [];
+      packageMenuOpen = false;
+      activePackageIndex = -1;
+      elements.packageOptions.replaceChildren();
+      setPackageStatus(appsError || "無法讀取已安裝套件", "error");
+      syncPackageMenuState();
+      return;
+    }
+
+    const matches = packageMatches();
+    visiblePackageApps = matches;
+    const packageCountByUid = new Map();
+    installedApps.forEach((app) => {
+      packageCountByUid.set(app.uid, (packageCountByUid.get(app.uid) || 0) + 1);
+    });
+    const selectedIndex = matches.findIndex((app) => app.packageName === selectedPackageName);
+    if (selectedIndex >= 0 && elements.packageSearch.value.trim() === selectedPackageName) {
+      activePackageIndex = selectedIndex;
+    } else if (activePackageIndex >= matches.length) {
+      activePackageIndex = matches.length > 0 ? 0 : -1;
+    }
+
+    elements.packageOptions.replaceChildren();
+    const userApps = matches.filter((app) => !app.isSystem);
+    const systemApps = matches.filter((app) => app.isSystem);
+    const userGroup = renderPackageGroup("使用者 App", userApps, packageCountByUid, 0);
+    const systemGroup = renderPackageGroup("系統 App", systemApps, packageCountByUid, userApps.length);
+    if (userGroup) elements.packageOptions.append(userGroup);
+    if (systemGroup) elements.packageOptions.append(systemGroup);
+    if (matches.length === 0) {
+      const empty = createElement(
+        documentRef,
+        "p",
+        "package-options-empty",
+        installedApps.length === 0
+          ? "沒有可觀察的已安裝套件"
+          : "找不到符合的包名，請縮短搜尋條件",
+      );
+      empty.setAttribute("role", "status");
+      elements.packageOptions.append(empty);
+    }
+
+    const selected = installedApps.find((app) => app.packageName === selectedPackageName);
+    if (packageSelectionInvalid) {
+      setPackageStatus("請從清單中選擇目標 App 包名", "error");
+    } else if (selected) {
+      const sharedCount = packageSharedCount(selected, packageCountByUid);
+      const shared = sharedCount > 1 ? ` · ${sharedCount} 個包名共享此 UID` : "";
+      setPackageStatus(`${packageTypeLabel(selected)} · ${selected.label} · UID ${selected.uid}${shared}`, "selected");
+    } else if (matches.length === 0) {
+      setPackageStatus(
+        installedApps.length === 0 ? "沒有可觀察的已安裝套件" : "找不到符合的包名",
+      );
+    } else {
+      setPackageStatus(`顯示 ${matches.length} / ${installedApps.length} 個套件`);
+    }
+    syncPackageMenuState();
+  }
+
+  function openPackageMenu() {
+    if (elements.scope.value !== "uid" || appsLoadState !== "ready") return;
+    if (packageMenuOpen) return;
+    packageMenuOpen = true;
+    renderPackageSelector();
+  }
+
+  function closePackageMenu() {
+    if (!packageMenuOpen) return;
+    packageMenuOpen = false;
+    activePackageIndex = -1;
+    renderPackageSelector();
+  }
+
+  function selectPackageAt(index) {
+    const app = visiblePackageApps[index];
+    if (!app) return;
+    selectedPackageName = app.packageName;
+    elements.packageSearch.value = app.packageName;
+    packageSelectionInvalid = false;
+    activePackageIndex = index;
+    packageMenuOpen = false;
+    renderPackageSelector();
+  }
+
+  function movePackageActive(direction) {
+    if (visiblePackageApps.length === 0) return;
+    if (!packageMenuOpen) packageMenuOpen = true;
+    if (activePackageIndex < 0) {
+      activePackageIndex = direction > 0 ? 0 : visiblePackageApps.length - 1;
+    } else {
+      activePackageIndex = (activePackageIndex + direction + visiblePackageApps.length) % visiblePackageApps.length;
+    }
+    renderPackageSelector();
+  }
+
+  function handlePackageKeydown(event) {
+    if (elements.packageSearch.disabled) return;
+    switch (event.key) {
+      case "ArrowDown":
+        event.preventDefault();
+        movePackageActive(1);
+        break;
+      case "ArrowUp":
+        event.preventDefault();
+        movePackageActive(-1);
+        break;
+      case "Home":
+        if (!packageMenuOpen) return;
+        event.preventDefault();
+        activePackageIndex = visiblePackageApps.length > 0 ? 0 : -1;
+        renderPackageSelector();
+        break;
+      case "End":
+        if (!packageMenuOpen) return;
+        event.preventDefault();
+        activePackageIndex = visiblePackageApps.length - 1;
+        renderPackageSelector();
+        break;
+      case "Enter":
+        if (packageMenuOpen && activePackageIndex >= 0) {
+          event.preventDefault();
+          selectPackageAt(activePackageIndex);
+        }
+        break;
+      case "Escape":
+        if (packageMenuOpen) {
+          event.preventDefault();
+          closePackageMenu();
+        }
+        break;
+      case "Tab":
+        closePackageMenu();
+        break;
+      default:
+        break;
+    }
+  }
+
+  async function loadInstalledApps() {
+    if (appsLoadState === "loading") return;
+    appsLoadState = "loading";
+    appsError = null;
+    renderPackageSelector();
+
+    try {
+      const token = new windowRef.URLSearchParams(windowRef.location.search).get("token");
+      if (!token) throw new Error("缺少存取權杖");
+      const response = await windowRef.fetch(
+        `/api/apps?token=${encodeURIComponent(token)}`,
+        { cache: "no-store", headers: { Accept: "application/json" } },
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(payload?.error || `無法讀取已安裝套件（HTTP ${response.status}）`);
+      }
+      installedApps = normalizeInstalledApps(payload);
+      if (!installedApps.some((app) => app.packageName === selectedPackageName)) {
+        selectedPackageName = "";
+        elements.packageSearch.value = "";
+      }
+      packageSelectionInvalid = false;
+      appsLoadState = "ready";
+    } catch (error) {
+      appsLoadState = "error";
+      appsError = error instanceof Error ? error.message : "無法讀取已安裝套件";
+    }
+    renderPackageSelector();
+  }
+
+  function updateScope() {
+    const isUid = elements.scope.value === "uid";
+    if (!isUid) {
+      packageMenuOpen = false;
+      activePackageIndex = -1;
+      packageSelectionInvalid = false;
+    }
+    elements.numericTargetField.hidden = isUid;
+    elements.packageTargetField.hidden = !isUid;
+    elements.targetId.disabled = isUid;
+    elements.targetId.required = !isUid;
+    elements.targetId.min = "1";
+    elements.targetId.max = String(MAX_PROCESS_ID);
+    elements.targetLabel.textContent = targetLabel(elements.scope.value);
+    renderPackageSelector();
+    if (isUid && appsLoadState === "idle") loadInstalledApps();
   }
 
   function scheduleReconnect() {
@@ -360,20 +768,56 @@ function setupBrowserClient(documentRef, windowRef) {
   }
 
   elements.scope.addEventListener("change", updateScope);
-  elements.syscallNr.addEventListener("input", updateSyscallName);
+  elements.packageSearch.addEventListener("focus", openPackageMenu);
+  elements.packageSearch.addEventListener("click", openPackageMenu);
+  elements.packageSearch.addEventListener("input", () => {
+    if (elements.packageSearch.value.trim() !== selectedPackageName) {
+      selectedPackageName = "";
+    }
+    packageSelectionInvalid = false;
+    packageMenuOpen = true;
+    activePackageIndex = 0;
+    renderPackageSelector();
+  });
+  elements.packageSearch.addEventListener("keydown", handlePackageKeydown);
+  elements.packageOptions.addEventListener("pointerdown", (event) => {
+    const option = event.target.closest?.("[role=option]");
+    if (option) event.preventDefault();
+  });
+  elements.packageOptions.addEventListener("click", (event) => {
+    const option = event.target.closest?.("[role=option]");
+    if (!option) return;
+    const index = Number(option.id.replace("package-option-", ""));
+    if (Number.isInteger(index)) selectPackageAt(index);
+  });
+  documentRef.addEventListener("pointerdown", (event) => {
+    if (!elements.packageCombobox.contains(event.target)) closePackageMenu();
+  });
+  elements.reloadApps.addEventListener("click", loadInstalledApps);
   elements.ruleForm.addEventListener("submit", (event) => {
     event.preventDefault();
     const phase = elements.ruleForm.querySelector("input[name=phase]:checked")?.value;
     try {
+      const targetId = elements.scope.value === "uid"
+        ? selectedPackageUid(installedApps, selectedPackageName)
+        : elements.targetId.value;
       const command = createObserveCommand({
         syscallNr: elements.syscallNr.value,
         scope: elements.scope.value,
-        targetId: elements.targetId.value,
+        targetId,
         phase,
       });
       sendCommand(command, "規則已新增");
     } catch (error) {
-      showCommandStatus(error instanceof Error ? error.message : "無效的規則", true);
+      const message = error instanceof Error ? error.message : "無效的規則";
+      packageSelectionInvalid = elements.scope.value === "uid" &&
+        !installedApps.some((app) => app.packageName === selectedPackageName);
+      if (packageSelectionInvalid) {
+        packageMenuOpen = true;
+        renderPackageSelector();
+        elements.packageSearch.focus();
+      }
+      showCommandStatus(message, true);
     }
   });
   elements.clearEvents.addEventListener("click", () => {
@@ -384,9 +828,8 @@ function setupBrowserClient(documentRef, windowRef) {
     sendCommand({ type: "restartListener" }, "已請求重新啟動讀取器");
   });
 
-  updateScope();
-  updateSyscallName();
   render();
+  updateScope();
   connect();
 }
 
