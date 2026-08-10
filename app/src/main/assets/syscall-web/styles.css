@@ -630,6 +630,7 @@ select {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
+
 /* ── Buttons ────────────────────────────────────────────────────────── */
 .button {
   display: inline-flex;
@@ -799,6 +800,30 @@ select {
   justify-content: flex-end;
   flex-wrap: wrap;
   gap: 8px;
+}
+
+.event-syscall-filter {
+  display: grid;
+  grid-template-columns: auto minmax(160px, 210px);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.event-syscall-filter > span {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.event-syscall-filter select {
+  min-width: 0;
+  min-height: 38px;
+  padding-top: 7px;
+  padding-bottom: 7px;
+  font-family: var(--mono);
+  font-size: 12px;
 }
 
 .event-list {
@@ -1130,6 +1155,11 @@ select {
 
   .events-controls {
     justify-content: flex-start;
+  }
+
+  .event-syscall-filter {
+    width: 100%;
+    grid-template-columns: auto minmax(0, 1fr);
   }
 
   .event-list {

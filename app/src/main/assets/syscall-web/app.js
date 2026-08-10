@@ -58,6 +58,7 @@ export function initialModel() {
   return {
     rules: [],
     events: [],
+    selectedSyscallNr: null,
     listener: { state: "starting", error: null },
     supportedSyscalls: [],
     nextDisplayId: 1,
@@ -66,9 +67,11 @@ export function initialModel() {
 
 export function reduceServerMessage(model, message) {
   if (message?.type === "state") {
+    const rules = Array.isArray(message.rules) ? [...message.rules] : [];
     return {
       ...model,
-      rules: Array.isArray(message.rules) ? [...message.rules] : [],
+      rules,
+      selectedSyscallNr: selectedSyscallForRules(rules, model.selectedSyscallNr),
       listener: normalizeListener(message.listener, model.listener),
       supportedSyscalls: Array.isArray(message.supportedSyscalls)
         ? normalizeSupportedSyscalls(message.supportedSyscalls)
@@ -155,6 +158,46 @@ export function clearEventsModel(model) {
     events: [],
     nextDisplayId: 1,
   };
+}
+
+/** 從作用中規則建立去重後的 syscall 選項，避免顯示未觀察的編號。 */
+export function observedSyscallsFromRules(rules) {
+  const byNumber = new Map();
+  (Array.isArray(rules) ? rules : []).forEach((rule) => {
+    const nr = Number(rule?.syscallNr);
+    if (!Number.isSafeInteger(nr) || nr < 0 || nr > 459 || byNumber.has(nr)) return;
+    const name = typeof rule?.name === "string" && rule.name.trim()
+      ? rule.name.trim()
+      : syscallName(nr);
+    byNumber.set(nr, { nr, name });
+  });
+  return [...byNumber.values()].sort((first, second) => first.nr - second.nr);
+}
+
+/** 只保留使用者目前選中 syscall 編號的事件。 */
+export function filterEventsBySyscall(events, selectedSyscallNr) {
+  if (selectedSyscallNr === null || selectedSyscallNr === undefined || selectedSyscallNr === "") return [];
+  const nr = Number(selectedSyscallNr);
+  if (!Number.isSafeInteger(nr)) return [];
+  return (Array.isArray(events) ? events : []).filter((event) => Number(event?.syscallNr) === nr);
+}
+
+/** 切換事件篩選器；無效選項會回退到目前規則中的第一個 syscall。 */
+export function selectEventSyscall(model, syscallNr) {
+  return {
+    ...model,
+    selectedSyscallNr: selectedSyscallForRules(model.rules, syscallNr),
+  };
+}
+
+/** 保留仍有效的選擇，否則選取排序後的第一個作用中 syscall。 */
+function selectedSyscallForRules(rules, selectedSyscallNr) {
+  const options = observedSyscallsFromRules(rules);
+  const hasSelection = selectedSyscallNr !== null &&
+    selectedSyscallNr !== undefined &&
+    selectedSyscallNr !== "";
+  const selected = hasSelection ? Number(selectedSyscallNr) : Number.NaN;
+  return options.some((entry) => entry.nr === selected) ? selected : (options[0]?.nr ?? null);
 }
 
 export function normalizeInstalledApps(payload) {
@@ -341,6 +384,7 @@ function setupBrowserClient(documentRef, windowRef) {
     ruleCount: documentRef.getElementById("rule-count"),
     eventList: documentRef.getElementById("event-list"),
     eventCount: documentRef.getElementById("event-count"),
+    eventSyscallFilter: documentRef.getElementById("event-syscall-filter"),
     clearEvents: documentRef.getElementById("clear-events"),
     listenerStatus: documentRef.getElementById("listener-status"),
     restartListener: documentRef.getElementById("restart-listener"),
@@ -824,6 +868,10 @@ function setupBrowserClient(documentRef, windowRef) {
     model = clearEventsModel(model);
     render();
   });
+  elements.eventSyscallFilter.addEventListener("change", () => {
+    model = selectEventSyscall(model, elements.eventSyscallFilter.value);
+    renderEvents(documentRef, elements, model);
+  });
   elements.restartListener.addEventListener("click", () => {
     sendCommand({ type: "restartListener" }, "已請求重新啟動讀取器");
   });
@@ -877,35 +925,35 @@ function renderListenerStatus(elements, listener) {
   elements.restartListener.disabled = state === "starting";
 }
 
-// Per-list render cache: displayId -> { node, event }. Keeping the DOM node
-// and the event object it was built from lets a live stream reuse rows instead
-// of rebuilding every <details> subtree on each message, which also preserves
-// expanded rows and scroll position.
+// 每個事件清單保留所有事件列，切換 syscall 時可重用節點並保留展開狀態。
 const eventRenderCache = new WeakMap();
 
 function renderEvents(documentRef, elements, model) {
-  const events = Array.isArray(model.events) ? model.events : [];
+  const allEvents = Array.isArray(model.events) ? model.events : [];
+  const options = observedSyscallsFromRules(model.rules);
+  const selectedSyscallNr = selectedSyscallForRules(model.rules, model.selectedSyscallNr);
+  const events = filterEventsBySyscall(allEvents, selectedSyscallNr);
   const list = elements.eventList;
+  renderEventSyscallFilter(documentRef, elements.eventSyscallFilter, options, selectedSyscallNr);
   elements.eventCount.textContent = String(events.length);
+  list.setAttribute(
+    "aria-label",
+    selectedSyscallNr === null
+      ? "Syscall 呼叫紀錄"
+      : `${selectedSyscallNr} ${syscallName(selectedSyscallNr)} 的呼叫紀錄`,
+  );
 
-  if (events.length === 0) {
+  if (selectedSyscallNr === null) {
     if (eventRenderCache.has(list)) eventRenderCache.delete(list);
-    list.replaceChildren(createElement(documentRef, "p", "empty-state", "尚未收到呼叫紀錄"));
+    list.replaceChildren(createElement(documentRef, "p", "empty-state", "請先新增觀察規則"));
     return;
   }
 
-  let cache = eventRenderCache.get(list);
-  if (!cache) {
-    cache = new Map();
-    eventRenderCache.set(list, cache);
-  }
+  const cache = eventRenderCache.get(list) || new Map();
 
-  // Build the desired node for each event, reusing the cached node whenever the
-  // event object is unchanged (===). A changed object (e.g. an enter promoted
-  // to complete) is rebuilt but keeps its open state.
+  // 為全部歷史事件保留快取，但只把選中 syscall 的節點放入畫面。
   const nextCache = new Map();
-  const desired = [];
-  events.forEach((event) => {
+  allEvents.forEach((event) => {
     const key = event.displayId;
     const cached = cache.get(key);
     let node;
@@ -916,16 +964,42 @@ function renderEvents(documentRef, elements, model) {
       if (cached && cached.node.open) node.open = true;
     }
     nextCache.set(key, { node, event });
-    desired.push(node);
   });
 
-  reconcileChildren(list, desired);
   eventRenderCache.set(list, nextCache);
+  if (events.length === 0) {
+    const selected = options.find((entry) => entry.nr === selectedSyscallNr);
+    const label = selected ? `${selected.nr} ${selected.name}` : String(selectedSyscallNr);
+    list.replaceChildren(createElement(documentRef, "p", "empty-state", `尚未收到 ${label} 的呼叫紀錄`));
+    return;
+  }
+
+  reconcileChildren(list, events.map((event) => nextCache.get(event.displayId).node));
 }
 
-// Reorder `parent`'s children to match `desired` with minimal DOM moves. Nodes
-// already in the right relative position are left untouched; a prepend of new
-// events costs one insert per new node rather than a full rebuild.
+/** 將作用中規則同步到事件篩選下拉菜單。 */
+function renderEventSyscallFilter(documentRef, select, options, selectedSyscallNr) {
+  const signature = options.map((entry) => `${entry.nr}:${entry.name}`).join("|");
+  if (select.dataset.catalog !== signature) {
+    select.replaceChildren();
+    if (options.length === 0) {
+      const placeholder = createElement(documentRef, "option", "", "尚未新增規則");
+      placeholder.value = "";
+      select.append(placeholder);
+    } else {
+      options.forEach((entry) => {
+        const option = createElement(documentRef, "option", "", `${entry.nr} · ${entry.name}`);
+        option.value = String(entry.nr);
+        select.append(option);
+      });
+    }
+    select.dataset.catalog = signature;
+  }
+  select.disabled = options.length === 0;
+  select.value = selectedSyscallNr === null ? "" : String(selectedSyscallNr);
+}
+
+// 以最少 DOM 移動讓子節點符合目標順序，降低高頻事件更新的重排成本。
 function reconcileChildren(parent, desired) {
   const wanted = new Set(desired);
   for (const child of Array.from(parent.childNodes)) {

@@ -105,6 +105,12 @@
             <span id="event-count" class="count">0</span>
           </div>
           <div class="events-controls">
+            <label class="event-syscall-filter">
+              <span>顯示 Syscall</span>
+              <select id="event-syscall-filter" disabled>
+                <option value="">尚未新增規則</option>
+              </select>
+            </label>
             <span id="listener-status" class="listener-status listener-status--starting" aria-live="polite">讀取器正在啟動</span>
             <button id="restart-listener" class="button button--quiet" type="button">重新啟動讀取器</button>
             <button id="clear-events" class="button button--quiet" type="button">清除畫面</button>

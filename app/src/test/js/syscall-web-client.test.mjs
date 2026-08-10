@@ -6,13 +6,16 @@ import {
   MAX_UID,
   createObserveCommand,
   createUnobserveCommand,
+  filterEventsBySyscall,
   filterInstalledApps,
   formatCapture,
   formatReturn,
   initialModel,
   normalizeInstalledApps,
   normalizeSupportedSyscalls,
+  observedSyscallsFromRules,
   reduceServerMessage,
+  selectEventSyscall,
   selectedPackageUid,
 } from "../../main/assets/syscall-web/app.js";
 
@@ -246,6 +249,56 @@ test("events retain only the configured newest-record limit", () => {
   assert.equal(model.events.at(-1).seq, "0x5");
   assert.equal(model.events[0].displayId, EVENT_LIMIT + 5);
   assert.equal(model.events.at(-1).displayId, 6);
+});
+
+test("event filter options only contain distinct syscalls from active rules", () => {
+  assert.deepEqual(observedSyscallsFromRules([
+    { syscallNr: 291, name: "statx" },
+    { syscallNr: 56, name: "openat" },
+    { syscallNr: 291, name: "duplicate" },
+    { syscallNr: 460, name: "invalid" },
+  ]), [
+    { nr: 56, name: "openat" },
+    { nr: 291, name: "statx" },
+  ]);
+});
+
+test("event syscall selection survives rule updates and falls back when removed", () => {
+  let model = reduceServerMessage(initialModel(), {
+    type: "state",
+    rules: [{ syscallNr: 291 }, { syscallNr: 56 }],
+  });
+  assert.equal(model.selectedSyscallNr, 56);
+
+  model = selectEventSyscall(model, 291);
+  model = reduceServerMessage(model, {
+    type: "state",
+    rules: [{ syscallNr: 64 }, { syscallNr: 291 }],
+  });
+  assert.equal(model.selectedSyscallNr, 291);
+
+  model = reduceServerMessage(model, {
+    type: "state",
+    rules: [{ syscallNr: 64 }],
+  });
+  assert.equal(model.selectedSyscallNr, 64);
+
+  model = reduceServerMessage(model, { type: "state", rules: [] });
+  assert.equal(model.selectedSyscallNr, null);
+});
+
+test("event filtering only returns records for the selected syscall", () => {
+  const events = [
+    event({ displayId: 1, syscallNr: 291 }),
+    event({ displayId: 2, syscallNr: 56 }),
+    event({ displayId: 3, syscallNr: 291 }),
+    event({ displayId: 4, syscallNr: 0 }),
+  ];
+  assert.deepEqual(
+    filterEventsBySyscall(events, 291).map((entry) => entry.displayId),
+    [1, 3],
+  );
+  assert.deepEqual(filterEventsBySyscall(events, null), []);
 });
 
 test("observe only accepts scoped positive targets and valid syscall phases", () => {
