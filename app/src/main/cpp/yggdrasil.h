@@ -78,11 +78,11 @@ struct ygg_hide_maps_request {
 /* KernelPatch exposes 460 name slots; each target is checked at runtime. */
 #define YGG_ARM64_SYSCALL_COUNT          460U
 #define YGG_SYSCALL_NR_ALL               0xffffffffU
-#define YGG_SYSCALL_ABI_VERSION           2U
+#define YGG_SYSCALL_ABI_VERSION           3U
 #define YGG_SYSCALL_RULE_REQUEST_SIZE     256U
 #define YGG_SYSCALL_EVENT_HEADER_SIZE     224U
 #define YGG_SYSCALL_CAPTURE_TLV_SIZE      32U
-#define YGG_SYSCALL_READ_REQUEST_SIZE     24U
+#define YGG_SYSCALL_READ_REQUEST_SIZE     40U
 #define YGG_SYSCALL_CAPTURE_COUNT_MAX     6U
 #define YGG_SYSCALL_CAPTURE_BYTES_MAX     512U
 #define YGG_SYSCALL_CAPTURE_PAYLOAD_MAX   1024U
@@ -94,14 +94,16 @@ struct ygg_hide_maps_request {
 #define YGG_SYSCALL_F_TRACE_EXIT         (1U << 2)
 #define YGG_SYSCALL_F_REPLACE_RETURN     (1U << 3)
 #define YGG_SYSCALL_F_TARGET_UID         (1U << 4)
+#define YGG_SYSCALL_F_CAPTURE_BACKTRACE  (1U << 5)
 
-#define YGG_SYSCALL_EVENT_MAGIC            0x59475343U
-#define YGG_SYSCALL_EVENT_VERSION          YGG_SYSCALL_ABI_VERSION
+#define YGG_SYSCALL_EVENT_MAGIC          0x59475343U
+#define YGG_SYSCALL_EVENT_VERSION        YGG_SYSCALL_ABI_VERSION
 #define YGG_SYSCALL_EVENT_F_ARGS_REPLACED  (1U << 0)
 #define YGG_SYSCALL_EVENT_F_RETURN_REPLACED (1U << 1)
 #define YGG_SYSCALL_EVENT_F_AFTER_DROPPED   (1U << 2)
 #define YGG_SYSCALL_EVENT_F_HAS_CAPTURES    (1U << 3)
 #define YGG_SYSCALL_EVENT_F_CAPTURE_PARTIAL (1U << 4)
+#define YGG_SYSCALL_EVENT_F_HAS_BACKTRACE   (1U << 5)
 
 #define YGG_SYSCALL_CAPTURE_PHASE_ENTER     (1U << 0)
 #define YGG_SYSCALL_CAPTURE_PHASE_EXIT      (1U << 1)
@@ -113,6 +115,23 @@ struct ygg_hide_maps_request {
 #define YGG_SYSCALL_CAPTURE_STATUS_TRUNCATED  (1U << 2)
 #define YGG_SYSCALL_CAPTURE_STATUS_SKIPPED    (1U << 3)
 #define YGG_SYSCALL_CAPTURE_STATUS_BUDGET     (1U << 4)
+
+/*
+ * Backtrace capture. A rule carrying YGG_SYSCALL_F_CAPTURE_BACKTRACE snapshots
+ * the user register file and a bounded slice of the user stack at trigger time,
+ * delivered atomically with its syscall event by
+ * PR_YGGDRASIL_SYSCALL_READ_EVENT.
+ */
+#define YGG_SYSCALL_BACKTRACE_EVENT_HEADER_SIZE  368U
+#define YGG_SYSCALL_BACKTRACE_EVENT_MAGIC        0x59475342U
+#define YGG_SYSCALL_BACKTRACE_EVENT_VERSION      YGG_SYSCALL_ABI_VERSION
+#define YGG_SYSCALL_BACKTRACE_STACK_DEFAULT      (4U << 10)
+#define YGG_SYSCALL_BACKTRACE_STACK_MAX          (64U << 10)
+
+#define YGG_SYSCALL_BACKTRACE_F_USER     (1U << 0)
+#define YGG_SYSCALL_BACKTRACE_F_COMPAT   (1U << 1)
+#define YGG_SYSCALL_BACKTRACE_F_STACK    (1U << 2)
+#define YGG_SYSCALL_BACKTRACE_F_PARTIAL  (1U << 3)
 
 enum ygg_syscall_capture_kind {
     YGG_SYSCALL_CAPTURE_CSTRING = 1,
@@ -190,7 +209,9 @@ struct ygg_syscall_rule_request {
     uint64_t arg_values[YGG_SYSCALL_ARG_COUNT];
     uint64_t return_value;
     uint64_t user_cookie;
-    uint64_t reserved;
+    /* Bytes of user stack to snapshot when YGG_SYSCALL_F_CAPTURE_BACKTRACE is set. */
+    uint32_t backtrace_stack_size;
+    uint32_t reserved;
     uint32_t capture_count;
     uint32_t capture_total_limit;
     struct ygg_syscall_capture_desc
@@ -252,6 +273,9 @@ struct ygg_syscall_read_event_request {
     uint64_t buffer;
     uint32_t buffer_size;
     uint32_t flags;
+    uint64_t backtrace_buffer;
+    uint32_t backtrace_buffer_size;
+    uint32_t reserved;
 };
 
 /*
@@ -316,6 +340,52 @@ struct ygg_hwbp_user_regs_snapshot {
     uint64_t sp;
     uint64_t pc;
     uint64_t pstate;
+};
+
+/**
+ * struct ygg_syscall_backtrace_event - Fixed header for a syscall backtrace record.
+ * @magic: YGG_SYSCALL_BACKTRACE_EVENT_MAGIC.
+ * @version: YGG_SYSCALL_BACKTRACE_EVENT_VERSION.
+ * @header_size: sizeof(struct ygg_syscall_backtrace_event).
+ * @total_size: header_size + stack_copied_size.
+ * @flags: YGG_SYSCALL_BACKTRACE_F_* describing capture mode and completeness.
+ * @phase: YGG_SYSCALL_PHASE_ENTER or YGG_SYSCALL_PHASE_EXIT.
+ * @seq: Monotonic backtrace sequence counter.
+ * @dropped: Backtrace records dropped with paired syscall events before this one.
+ * @call_id: Matches the syscall event's call_id for correlation.
+ * @tid: Thread id (init PID namespace).
+ * @tgid: Thread-group id (init PID namespace).
+ * @syscall_nr: Intercepted syscall number.
+ * @stack_requested_size: Bytes of user stack requested by the rule.
+ * @stack_copied_size: Bytes of user stack actually captured (trails the header).
+ * @stack_addr: User stack pointer the snapshot begins at.
+ * @comm: Task command name.
+ * @regs: User register snapshot for FP-walk or DWARF unwinding.
+ */
+struct ygg_syscall_backtrace_event {
+    uint32_t magic;
+    uint32_t version;
+    uint32_t header_size;
+    uint32_t total_size;
+    uint32_t flags;
+    uint32_t phase;
+    uint64_t seq;
+    uint64_t dropped;
+    uint64_t call_id;
+    uint32_t tid;
+    uint32_t tgid;
+    uint32_t syscall_nr;
+    uint32_t stack_requested_size;
+    uint32_t stack_copied_size;
+    uint32_t reserved;
+    uint64_t stack_addr;
+    char comm[16];
+    struct ygg_hwbp_user_regs_snapshot regs;
+};
+
+struct ygg_syscall_backtrace_event_record {
+    struct ygg_syscall_backtrace_event event;
+    uint8_t stack[YGG_SYSCALL_BACKTRACE_STACK_MAX];
 };
 
 struct ygg_hwbp_event_header {

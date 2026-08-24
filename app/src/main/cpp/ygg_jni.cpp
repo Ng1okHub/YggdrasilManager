@@ -59,6 +59,9 @@ static_assert(sizeof(struct ygg_syscall_event_record) ==
 static_assert(sizeof(struct ygg_syscall_read_event_request) ==
                   YGG_SYSCALL_READ_REQUEST_SIZE,
               "unexpected syscall read ABI layout");
+static_assert(sizeof(struct ygg_syscall_backtrace_event) ==
+                  YGG_SYSCALL_BACKTRACE_EVENT_HEADER_SIZE,
+              "unexpected syscall backtrace ABI layout");
 
 /* Keep this table in lockstep with yggdrasil_client.cpp's automatic schema. */
 struct syscall_capture_template {
@@ -256,15 +259,16 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hideDbg(
     return (jint)(ret < 0 ? -errno : 0);
 }
 
-extern "C" JNIEXPORT jint JNICALL
-Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallConfigure(
-        JNIEnv *, jobject, jint op, jint flags, jint syscallNr, jlong targetId) {
+static jint syscall_configure_impl(
+        jint op, jint flags, jint syscallNr, jlong targetId,
+        jint backtrace_stack_size) {
     struct ygg_syscall_rule_request req = {};
     const uint32_t selector_flags = YGG_SYSCALL_F_SINGLE_THREAD |
                                     YGG_SYSCALL_F_TARGET_UID;
     const uint32_t observe_flags = selector_flags |
                                    YGG_SYSCALL_F_TRACE_ENTER |
-                                   YGG_SYSCALL_F_TRACE_EXIT;
+                                   YGG_SYSCALL_F_TRACE_EXIT |
+                                   YGG_SYSCALL_F_CAPTURE_BACKTRACE;
     const uint32_t request_flags = (uint32_t)flags;
 
     if (syscallNr < 0 || (uint32_t)syscallNr >= YGG_ARM64_SYSCALL_COUNT) {
@@ -295,6 +299,13 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallConfigure(
             return -EINVAL;
         }
         req.flags = request_flags;
+        if (request_flags & YGG_SYSCALL_F_CAPTURE_BACKTRACE) {
+            if (backtrace_stack_size < 0 ||
+                backtrace_stack_size > (jint)YGG_SYSCALL_BACKTRACE_STACK_MAX) {
+                return -EINVAL;
+            }
+            req.backtrace_stack_size = (uint32_t)backtrace_stack_size;
+        }
         populate_auto_capture_descriptors(req.syscall_nr, req.flags, &req);
     } else {
         if (request_flags & ~selector_flags) {
@@ -313,6 +324,20 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallConfigure(
         ret = prctl(PR_YGGDRASIL_SYSCALL_CONFIG, &req, 0, 0, 0);
     }
     return (jint)(ret < 0 ? -errno : 0);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallConfigure(
+        JNIEnv *, jobject, jint op, jint flags, jint syscallNr, jlong targetId) {
+    return syscall_configure_impl(op, flags, syscallNr, targetId, 0);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallConfigureWithBacktrace(
+        JNIEnv *, jobject, jint op, jint flags, jint syscallNr, jlong targetId,
+        jint backtraceStackSize) {
+    return syscall_configure_impl(
+        op, flags, syscallNr, targetId, backtraceStackSize);
 }
 
 static void unregister_syscall_listener() {
@@ -393,6 +418,36 @@ static bool is_valid_syscall_event(
                !!(event->event_flags & YGG_SYSCALL_EVENT_F_CAPTURE_PARTIAL);
 }
 
+static struct ygg_syscall_backtrace_event_record g_syscall_backtrace_record;
+
+static bool is_valid_syscall_backtrace(
+        const struct ygg_syscall_backtrace_event_record *record,
+        size_t bytes, uint64_t expected_call_id, uint32_t expected_phase) {
+    if (!record || bytes < sizeof(record->event) || bytes > sizeof(*record)) {
+        return false;
+    }
+    const struct ygg_syscall_backtrace_event *event =
+        &record->event;
+    if (event->magic != YGG_SYSCALL_BACKTRACE_EVENT_MAGIC ||
+        event->version != YGG_SYSCALL_BACKTRACE_EVENT_VERSION ||
+        event->header_size != sizeof(*event) ||
+        event->total_size != (uint32_t)bytes ||
+        event->stack_copied_size !=
+            (uint32_t)(bytes - sizeof(*event)) ||
+        event->stack_copied_size > YGG_SYSCALL_BACKTRACE_STACK_MAX ||
+        (event->flags & ~((uint32_t)YGG_SYSCALL_BACKTRACE_F_USER |
+                          YGG_SYSCALL_BACKTRACE_F_COMPAT |
+                          YGG_SYSCALL_BACKTRACE_F_STACK |
+                          YGG_SYSCALL_BACKTRACE_F_PARTIAL)) ||
+        (event->phase != YGG_SYSCALL_PHASE_ENTER &&
+            event->phase != YGG_SYSCALL_PHASE_EXIT) ||
+        !event->call_id || event->call_id != expected_call_id ||
+        event->phase != expected_phase || event->syscall_nr >= YGG_ARM64_SYSCALL_COUNT) {
+        return false;
+    }
+    return true;
+}
+
 static void signal_syscall_start_result(int result) {
     pthread_mutex_lock(&g_syscall_listen_mutex);
     if (g_syscall_start_pending) {
@@ -460,11 +515,16 @@ static void *syscall_listen_thread(void *) {
     req.version = YGG_SYSCALL_ABI_VERSION;
     req.buffer = (uint64_t)(uintptr_t)&record;
     req.buffer_size = sizeof(record);
+    req.backtrace_buffer =
+        (uint64_t)(uintptr_t)&g_syscall_backtrace_record;
+    req.backtrace_buffer_size = sizeof(g_syscall_backtrace_record);
     req.flags = YGG_SYSCALL_READ_F_LISTENER;
 
     int listener_error = 0;
     while (!g_syscall_stop.load()) {
         memset(&record, 0, sizeof(record));
+        memset(&g_syscall_backtrace_record, 0,
+               sizeof(g_syscall_backtrace_record));
         const long ret = prctl(PR_YGGDRASIL_SYSCALL_READ_EVENT, &req, 0, 0, 0);
         if (ret < 0) {
             const int read_error = errno;
@@ -475,18 +535,8 @@ static void *syscall_listen_thread(void *) {
                 continue;
             }
             if (read_error == EINTR) continue;
-            // EIO means the kernel skipped one corrupt ring slot and advanced
-            // the tail.  Treat it like EAGAIN: log once, then keep reading.
-            // (Without the kernel fix the ring would wedge; with it, one
-            // corrupt event is dropped and subsequent reads proceed normally.)
-            if (read_error == EIO) {
-                YGG_SLOGW("read loop: kernel skipped corrupt event (EIO), continuing");
-                nanosleep(&delay, nullptr);
-                continue;
-            }
-            // Candidate (B): a fatal read errno. errno=5 here means the kernel
-            // read-event guard rejected the queued event's total_size, which
-            // points at a stale/mismatched on-device KPM binary.
+            // EIO includes an invalid event/backtrace pair. The atomic reader
+            // leaves that slot queued, so retrying would loop on the same data.
             YGG_SLOGE("read loop FATAL: prctl errno=%d -> stopping listener",
                       read_error);
             listener_error = -read_error;
@@ -510,6 +560,28 @@ static void *syscall_listen_thread(void *) {
         }
 
         const struct ygg_syscall_event *event = &record.event;
+        const bool has_backtrace =
+            event->event_flags & YGG_SYSCALL_EVENT_F_HAS_BACKTRACE;
+        const struct ygg_syscall_backtrace_event *backtrace =
+            has_backtrace ? &g_syscall_backtrace_record.event : nullptr;
+        if (has_backtrace &&
+            !is_valid_syscall_backtrace(
+                &g_syscall_backtrace_record,
+                g_syscall_backtrace_record.event.total_size,
+                event->call_id, event->phase)) {
+            const struct ygg_syscall_backtrace_event *bt =
+                &g_syscall_backtrace_record.event;
+            YGG_SLOGE("read loop INVALID backtrace (errno=EPROTO/71): "
+                      "magic=0x%08x(exp 0x%08x) version=%u(exp %u) "
+                      "header_size=%u(exp %zu) total_size=%u call=%" PRIu64
+                      "(exp %" PRIu64 ") phase=%u(exp %u)",
+                      bt->magic, YGG_SYSCALL_BACKTRACE_EVENT_MAGIC,
+                      bt->version, YGG_SYSCALL_BACKTRACE_EVENT_VERSION,
+                      bt->header_size, sizeof(*bt), bt->total_size,
+                      bt->call_id, event->call_id, bt->phase, event->phase);
+            listener_error = -EPROTO;
+            break;
+        }
         const size_t comm_len = strnlen(event->comm, sizeof(event->comm));
         const std::string comm_text(event->comm, comm_len);
         jstring comm = env->NewStringUTF(comm_text.c_str());
@@ -566,6 +638,51 @@ static void *syscall_listen_thread(void *) {
             }
         }
 
+        jint backtrace_flags = backtrace ? (jint)backtrace->flags : 0;
+        jlong backtrace_seq = backtrace ? (jlong)backtrace->seq : 0;
+        jlong backtrace_dropped = backtrace ? (jlong)backtrace->dropped : 0;
+        jlong backtrace_call_id = backtrace ? (jlong)backtrace->call_id : 0;
+        jint backtrace_phase = backtrace ? (jint)backtrace->phase : 0;
+        jint backtrace_tid = backtrace ? (jint)backtrace->tid : 0;
+        jint backtrace_tgid = backtrace ? (jint)backtrace->tgid : 0;
+        jint backtrace_syscall_nr = backtrace ? (jint)backtrace->syscall_nr : 0;
+        jint backtrace_stack_requested = backtrace ?
+            (jint)backtrace->stack_requested_size : 0;
+        jint backtrace_stack_copied = backtrace ?
+            (jint)backtrace->stack_copied_size : 0;
+        jlong backtrace_stack_addr = backtrace ?
+            (jlong)backtrace->stack_addr : 0;
+        jlongArray backtrace_regs = env->NewLongArray(backtrace ? 34 : 0);
+        jbyteArray backtrace_stack = env->NewByteArray(backtrace ?
+            (jsize)backtrace->stack_copied_size : 0);
+        if (!backtrace_regs || !backtrace_stack) {
+            env->ExceptionClear();
+            if (backtrace_regs) env->DeleteLocalRef(backtrace_regs);
+            if (backtrace_stack) env->DeleteLocalRef(backtrace_stack);
+            backtrace = nullptr;
+            backtrace_flags = 0;
+            backtrace_seq = backtrace_dropped = backtrace_call_id = 0;
+            backtrace_phase = backtrace_tid = backtrace_tgid = backtrace_syscall_nr = 0;
+            backtrace_stack_requested = backtrace_stack_copied = 0;
+            backtrace_stack_addr = 0;
+            backtrace_regs = env->NewLongArray(0);
+            backtrace_stack = env->NewByteArray(0);
+        }
+        if (backtrace) {
+            jlong values[34] = {};
+            memcpy(values, backtrace->regs.regs, sizeof(backtrace->regs.regs));
+            values[31] = (jlong)backtrace->regs.sp;
+            values[32] = (jlong)backtrace->regs.pc;
+            values[33] = (jlong)backtrace->regs.pstate;
+            env->SetLongArrayRegion(backtrace_regs, 0, 34, values);
+            if (backtrace->stack_copied_size > 0) {
+                env->SetByteArrayRegion(
+                    backtrace_stack, 0, (jsize)backtrace->stack_copied_size,
+                    reinterpret_cast<const jbyte *>(g_syscall_backtrace_record.stack));
+            }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+
         const uint32_t target_id =
             (event->rule_flags & YGG_SYSCALL_F_TARGET_UID) ?
                 event->target_uid : event->target_pid;
@@ -578,13 +695,19 @@ static void *syscall_listen_thread(void *) {
             comm, (jlong)event->user_cookie, (jlong)event->arg_mask,
             args_before, args_after,
             (jlong)event->return_before, (jlong)event->return_after,
-            (jint)event->capture_count, capture_payload);
+            (jint)event->capture_count, capture_payload,
+            backtrace_flags, backtrace_seq, backtrace_dropped, backtrace_call_id,
+            backtrace_phase, backtrace_tid, backtrace_tgid, backtrace_syscall_nr,
+            backtrace_stack_requested, backtrace_stack_copied, backtrace_stack_addr,
+            backtrace_regs, backtrace_stack);
         if (env->ExceptionCheck()) env->ExceptionClear();
 
         env->DeleteLocalRef(comm);
         env->DeleteLocalRef(args_before);
         env->DeleteLocalRef(args_after);
         env->DeleteLocalRef(capture_payload);
+        env->DeleteLocalRef(backtrace_regs);
+        env->DeleteLocalRef(backtrace_stack);
     }
 
     if (listener_error && !g_syscall_stop.exchange(true)) {
@@ -627,7 +750,7 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallStartListen(
     jmethodID on_event_mid = env->GetMethodID(
         cls,
         "onEvent",
-        "(JJJIIIIIIJLjava/lang/String;JJ[J[JJJI[B)V");
+        "(JJJIIIIIIJLjava/lang/String;JJ[J[JJJI[BIJJJIIIIIIJ[J[B)V");
     if (!on_event_mid) {
         if (env->ExceptionCheck()) env->ExceptionClear();
         env->DeleteLocalRef(cls);

@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -15,6 +16,7 @@ import kotlinx.serialization.json.put
 import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
 import ng1ok.yggdrasilmanager.data.model.Arm64SyscallCatalog
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
+import ng1ok.yggdrasilmanager.data.model.SyscallBacktrace
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerStatus
 import ng1ok.yggdrasilmanager.data.model.SyscallObserveRule
 import ng1ok.yggdrasilmanager.data.model.SyscallScope
@@ -26,6 +28,8 @@ internal sealed interface SyscallClientCommand {
     data class Unobserve(val rule: SyscallObserveRule) : SyscallClientCommand
 
     data object RestartListener : SyscallClientCommand
+
+    data class Config(val backtraceMode: String) : SyscallClientCommand
 }
 
 private val protocolJson = Json { ignoreUnknownKeys = true }
@@ -54,6 +58,9 @@ internal fun decodeSyscallClientCommand(text: String): Result<SyscallClientComma
             ),
         )
         "restartListener" -> SyscallClientCommand.RestartListener
+        "config" -> SyscallClientCommand.Config(
+            backtraceMode = SyscallBacktrace.normalizeMode(root.requiredString("backtraceMode")),
+        )
         else -> throw IllegalArgumentException("未知的訊息類型：$type")
     }
 }
@@ -86,7 +93,19 @@ private fun decodeRule(
     require(
         allowObserverScope || scope != SyscallScope.UID || targetId != 0L
     ) { ROOT_UID_SCOPE_UNAVAILABLE }
-    return SyscallObserveRule(syscallNr, scope, targetId, phase)
+    val captureBacktrace = root["backtrace"]?.jsonPrimitive?.booleanOrNull
+        ?: root["captureBacktrace"]?.jsonPrimitive?.booleanOrNull
+        ?: false
+    val backtraceStackSize = root["backtraceStackSize"]?.jsonPrimitive?.intOrNull
+        ?: SyscallBacktrace.DEFAULT_STACK_SIZE
+    return SyscallObserveRule(
+        syscallNr = syscallNr,
+        scope = scope,
+        targetId = targetId,
+        phase = phase,
+        captureBacktrace = captureBacktrace,
+        backtraceStackSize = backtraceStackSize,
+    )
 }
 
 private fun JsonObject.requiredString(name: String): String {
@@ -113,8 +132,10 @@ internal fun encodeSyscallState(
     rules: List<SyscallObserveRule>,
     listenerStatus: SyscallListenerStatus = SyscallListenerStatus(),
     supportedSyscalls: List<Int> = emptyList(),
+    backtraceMode: String = SyscallBacktrace.MODE_FP,
 ): String = buildJsonObject {
     put("type", "state")
+    put("backtraceMode", SyscallBacktrace.normalizeMode(backtraceMode))
     put("listener", buildJsonObject {
         put("state", listenerStatus.state.wireName)
         put("error", listenerStatus.error?.let(::JsonPrimitive) ?: JsonNull)
@@ -140,6 +161,8 @@ internal fun encodeSyscallState(
                 put("scope", rule.scope.wireName)
                 put("targetId", rule.targetId)
                 put("phase", rule.phase.wireName)
+                put("backtrace", rule.captureBacktrace)
+                put("backtraceStackSize", rule.backtraceStackSize)
             })
         }
     })
@@ -215,7 +238,47 @@ internal fun encodeSyscallEvent(event: SyscallEvent): String = buildJsonObject {
         put("returnBefore", JsonNull)
         put("return", JsonNull)
     }
+    val backtrace = event.backtrace
+    if (backtrace != null) {
+        put("backtraceMode", backtrace.mode)
+        put("backtraceNote", backtrace.note?.let(::JsonPrimitive) ?: JsonNull)
+        put("backtrace", buildJsonObject {
+            put("flags", backtrace.flags)
+            put("seq", backtrace.seq.toHexValue())
+            put("dropped", backtrace.dropped.toHexValue())
+            put("callId", backtrace.callId.toHexValue())
+            put("phase", backtrace.phaseName())
+            put("tid", backtrace.tid)
+            put("tgid", backtrace.tgid)
+            put("syscallNr", backtrace.syscallNr)
+            put("stackAddr", backtrace.stackAddr.toHexValue())
+            put("stackRequestedSize", backtrace.stackRequestedSize)
+            put("stackCopiedSize", backtrace.stackCopiedSize)
+        })
+        put("backtraceFrames", buildJsonArray {
+            backtrace.frames.forEach { frame ->
+                add(buildJsonObject {
+                    put("index", frame.index)
+                    put("pc", frame.pc.toHexValue())
+                    put("label", frame.label)
+                    put("module", frame.module?.let(::JsonPrimitive) ?: JsonNull)
+                    put("offset", frame.offset?.toHexValue()?.let(::JsonPrimitive) ?: JsonNull)
+                })
+            }
+        })
+    } else {
+        put("backtraceMode", JsonNull)
+        put("backtraceNote", JsonNull)
+        put("backtrace", JsonNull)
+        put("backtraceFrames", buildJsonArray { })
+    }
 }.toString()
+
+private fun SyscallBacktrace.phaseName(): String = when (phase) {
+    SyscallEvent.PHASE_ENTER -> "enter"
+    SyscallEvent.PHASE_EXIT -> "exit"
+    else -> "unknown"
+}
 
 internal fun encodeSyscallAck(result: Result<Unit>): String = buildJsonObject {
     put("type", "ack")

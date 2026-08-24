@@ -16,6 +16,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlin.concurrent.withLock
@@ -23,6 +25,10 @@ import ng1ok.yggdrasilmanager.App
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
 import ng1ok.yggdrasilmanager.data.hidedbg.InstalledAppsSource
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerState
+import ng1ok.yggdrasilmanager.data.model.SyscallEvent
+import ng1ok.yggdrasilmanager.data.model.SyscallBacktrace
+import ng1ok.yggdrasilmanager.data.model.SyscallBacktraceEnricher
+import ng1ok.yggdrasilmanager.data.model.CachedFileProcMapsSource
 import ng1ok.yggdrasilmanager.data.model.SyscallObserveRule
 
 data class SyscallUiState(
@@ -45,19 +51,18 @@ class SyscallViewModel internal constructor(
 
     private val serverLock = ReentrantLock()
     private val cleared = AtomicBoolean(false)
+    private val _backtraceMode = MutableStateFlow(SyscallBacktrace.MODE_FP)
     private val server: SyscallServer
 
     val uiState: StateFlow<SyscallUiState>
 
     init {
-        val supportedSyscalls = repo.nativeApi.syscallCaptureSupportedNumbers()
-            .asSequence()
-            .distinct()
-            .sorted()
-            .toList()
+        // Backtrace capture is independent from the optional automatic capture
+        // schemas, so the selector must expose every Arm64 syscall number.
+        val supportedSyscalls = (0 until 460).toList()
         server = serverFactory.create(
             SyscallServerBindings(
-                events = repo.syscallEvents,
+                events = repo.syscallEvents.map(::enrichEvent).flowOn(Dispatchers.IO),
                 rules = { rules.value },
                 listenerStatus = repo.syscallListenerStatus,
                 supportedSyscalls = supportedSyscalls,
@@ -69,6 +74,8 @@ class SyscallViewModel internal constructor(
                 observe = ::observe,
                 unobserve = ::unobserve,
                 restartListener = ::restartListener,
+                backtraceMode = { _backtraceMode.value },
+                setBacktraceMode = ::setBacktraceMode,
             ),
         )
         uiState = combine(
@@ -149,6 +156,32 @@ class SyscallViewModel internal constructor(
 
     private fun restartListener() {
         repo.restartSyscallEventStream()
+    }
+
+    private fun setBacktraceMode(mode: String): Result<Unit> {
+        _backtraceMode.value = SyscallBacktrace.normalizeMode(mode)
+        return Result.success(Unit)
+    }
+
+    private fun enrichEvent(event: SyscallEvent): SyscallEvent {
+        val snapshot = event.backtrace ?: return event
+        return runCatching {
+            event.copy(
+                backtrace = SyscallBacktraceEnricher.enrich(
+                    snapshot = snapshot,
+                    mode = _backtraceMode.value,
+                    native = repo.nativeApi,
+                    mapsSource = CachedFileProcMapsSource,
+                ),
+            )
+        }.getOrElse { error ->
+            event.copy(
+                backtrace = snapshot.copy(
+                    mode = SyscallBacktrace.normalizeMode(_backtraceMode.value),
+                    note = "backtrace failed: ${error.message ?: error.javaClass.simpleName}",
+                ),
+            )
+        }
     }
 
     private fun publishError(error: Throwable) {

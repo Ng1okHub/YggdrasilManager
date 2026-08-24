@@ -45,6 +45,13 @@ class SyscallProtocolTest {
             observe.rule.configureFlags,
         )
 
+        val backtraceObserve = decodeSyscallClientCommand(
+            """{"type":"observe","syscallNr":64,"scope":"tgid","targetId":1234,"phase":"enter","backtrace":true,"backtraceStackSize":8192}""",
+        ).getOrThrow() as SyscallClientCommand.Observe
+        assertTrue(backtraceObserve.rule.captureBacktrace)
+        assertEquals(8192, backtraceObserve.rule.backtraceStackSize)
+        assertTrue(backtraceObserve.rule.configureFlags and SyscallObserveRule.FLAG_CAPTURE_BACKTRACE != 0)
+
         val unobserve = decodeSyscallClientCommand(
             """{"type":"unobserve","syscallNr":93,"scope":"global"}""",
         ).getOrThrow() as SyscallClientCommand.Unobserve
@@ -66,6 +73,10 @@ class SyscallProtocolTest {
         assertEquals(
             SyscallClientCommand.RestartListener,
             decodeSyscallClientCommand("""{"type":"restartListener"}""").getOrThrow(),
+        )
+        assertEquals(
+            SyscallClientCommand.Config("dwarf"),
+            decodeSyscallClientCommand("""{"type":"config","backtraceMode":"dwarf"}""").getOrThrow(),
         )
     }
 

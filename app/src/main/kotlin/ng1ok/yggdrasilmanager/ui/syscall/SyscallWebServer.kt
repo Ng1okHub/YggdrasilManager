@@ -56,6 +56,7 @@ import kotlinx.coroutines.withContext
 import kotlin.concurrent.withLock
 import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
+import ng1ok.yggdrasilmanager.data.model.SyscallBacktrace
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerStatus
 import ng1ok.yggdrasilmanager.data.model.SyscallObserveRule
 
@@ -76,6 +77,8 @@ internal data class SyscallServerBindings(
     val observe: suspend (SyscallObserveRule) -> Result<Unit>,
     val unobserve: suspend (SyscallObserveRule) -> Result<Unit>,
     val restartListener: () -> Unit,
+    val backtraceMode: () -> String = { SyscallBacktrace.MODE_FP },
+    val setBacktraceMode: (String) -> Result<Unit> = { Result.success(Unit) },
 )
 
 internal interface SyscallServer {
@@ -201,6 +204,7 @@ internal fun Application.installSyscallWebRoutes(
                     bindings.rules(),
                     listenerStatus,
                     bindings.supportedSyscalls,
+                    bindings.backtraceMode(),
                 ),
             )
         }
@@ -249,6 +253,7 @@ internal fun Application.installSyscallWebRoutes(
                     bindings.rules(),
                     bindings.listenerStatus.value,
                     bindings.supportedSyscalls,
+                    bindings.backtraceMode(),
                 ),
             )
             try {
@@ -265,6 +270,7 @@ internal fun Application.installSyscallWebRoutes(
                         SyscallClientCommand.RestartListener -> runCatching {
                             bindings.restartListener()
                         }
+                        is SyscallClientCommand.Config -> bindings.setBacktraceMode(command.backtraceMode)
                     }
                     hub.send(this, encodeSyscallAck(result))
                     if (result.isSuccess) {
@@ -273,6 +279,7 @@ internal fun Application.installSyscallWebRoutes(
                                 bindings.rules(),
                                 bindings.listenerStatus.value,
                                 bindings.supportedSyscalls,
+                                bindings.backtraceMode(),
                             ),
                         )
                     }
@@ -417,6 +424,7 @@ internal class SyscallWebServer(
                 bindings.rules(),
                 bindings.listenerStatus.value,
                 bindings.supportedSyscalls,
+                bindings.backtraceMode(),
             ),
         )
     }

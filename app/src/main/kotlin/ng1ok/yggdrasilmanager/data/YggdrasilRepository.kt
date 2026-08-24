@@ -19,6 +19,7 @@ import kotlinx.coroutines.Dispatchers
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
+import ng1ok.yggdrasilmanager.data.model.SyscallBacktrace
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerState
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerStatus
 import ng1ok.yggdrasilmanager.data.model.SyscallObserveRule
@@ -193,6 +194,19 @@ class YggdrasilRepository(
             returnAfter: Long,
             captureCount: Int,
             capturePayload: ByteArray,
+            backtraceFlags: Int,
+            backtraceSeq: Long,
+            backtraceDropped: Long,
+            backtraceCallId: Long,
+            backtracePhase: Int,
+            backtraceTid: Int,
+            backtraceTgid: Int,
+            backtraceSyscallNr: Int,
+            backtraceStackRequestedSize: Int,
+            backtraceStackCopiedSize: Int,
+            backtraceStackAddr: Long,
+            backtraceRegs: LongArray,
+            backtraceStack: ByteArray,
         ) {
             val pendingRelayDrops = syscallRelayDropped.getAndSet(0)
             val event = SyscallEvent(
@@ -216,6 +230,26 @@ class YggdrasilRepository(
                     captureCount = captureCount,
                     capturePayload = capturePayload.copyOf(),
                     relayDropped = pendingRelayDrops,
+                    backtrace = if (
+                        eventFlags and SyscallEvent.FLAG_HAS_BACKTRACE != 0 &&
+                        backtraceCallId != 0L
+                    ) {
+                        SyscallBacktrace(
+                            flags = backtraceFlags,
+                            seq = backtraceSeq,
+                            dropped = backtraceDropped,
+                            callId = backtraceCallId,
+                            phase = backtracePhase,
+                            tid = backtraceTid,
+                            tgid = backtraceTgid,
+                            syscallNr = backtraceSyscallNr,
+                            stackRequestedSize = backtraceStackRequestedSize,
+                            stackCopiedSize = backtraceStackCopiedSize,
+                            stackAddr = backtraceStackAddr,
+                            regs = backtraceRegs.copyOf(),
+                            stack = backtraceStack.copyOf(),
+                        )
+                    } else null,
                 )
             if (syscallEventQueue.trySend(event).isFailure) {
                 syscallRelayDropped.addAndGet(pendingRelayDrops + 1)

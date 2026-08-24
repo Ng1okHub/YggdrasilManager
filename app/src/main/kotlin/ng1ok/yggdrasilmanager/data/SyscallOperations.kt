@@ -18,12 +18,22 @@ internal interface SyscallOperations {
 internal class LocalSyscallOperations(
     private val native: YggdrasilNativeApi,
 ) : SyscallOperations {
-    override suspend fun setRule(rule: SyscallObserveRule): Int = native.syscallConfigure(
-        SyscallObserveRule.OP_SET,
-        rule.configureFlags,
-        rule.syscallNr,
-        rule.targetId,
-    )
+    override suspend fun setRule(rule: SyscallObserveRule): Int = if (rule.captureBacktrace) {
+        native.syscallConfigureWithBacktrace(
+            SyscallObserveRule.OP_SET,
+            rule.configureFlags,
+            rule.syscallNr,
+            rule.targetId,
+            rule.backtraceStackSize,
+        )
+    } else {
+        native.syscallConfigure(
+            SyscallObserveRule.OP_SET,
+            rule.configureFlags,
+            rule.syscallNr,
+            rule.targetId,
+        )
+    }
 
     override suspend fun deleteRule(rule: SyscallObserveRule): Int = native.syscallConfigure(
         SyscallObserveRule.OP_DELETE,

@@ -31,6 +31,8 @@ data class SyscallObserveRule(
     val scope: SyscallScope,
     val targetId: Long,
     val phase: SyscallTracePhase,
+    val captureBacktrace: Boolean = false,
+    val backtraceStackSize: Int = SyscallBacktrace.DEFAULT_STACK_SIZE,
 ) {
     init {
         require(syscallNr in 0 until ARM64_SYSCALL_COUNT) {
@@ -52,6 +54,9 @@ data class SyscallObserveRule(
         require(!(syscallNr in EXIT_ONLY_UNSUPPORTED && phase.tracesExit)) {
             "exit 與 exit_group 僅支援進入階段的觀察"
         }
+        require(backtraceStackSize in 0..SyscallBacktrace.MAX_STACK_SIZE) {
+            "backtrace stack size must be between 0 and ${SyscallBacktrace.MAX_STACK_SIZE}"
+        }
     }
 
     val configureFlags: Int
@@ -59,6 +64,7 @@ data class SyscallObserveRule(
             var flags = 0
             if (phase.tracesEnter) flags = flags or FLAG_TRACE_ENTER
             if (phase.tracesExit) flags = flags or FLAG_TRACE_EXIT
+            if (captureBacktrace) flags = flags or FLAG_CAPTURE_BACKTRACE
             return flags or selectorFlags
         }
 
@@ -85,6 +91,7 @@ data class SyscallObserveRule(
         const val FLAG_TRACE_ENTER = 1 shl 1
         const val FLAG_TRACE_EXIT = 1 shl 2
         const val FLAG_TARGET_UID = 1 shl 4
+        const val FLAG_CAPTURE_BACKTRACE = 1 shl 5
         const val OP_SET = 1
         const val OP_DELETE = 2
         const val MAX_UID = 0xffff_ffffL

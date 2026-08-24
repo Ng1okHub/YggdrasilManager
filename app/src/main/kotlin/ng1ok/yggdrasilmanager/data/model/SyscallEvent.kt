@@ -23,6 +23,7 @@ data class SyscallEvent(
     val capturePayload: ByteArray = ByteArray(0),
     /** Events lost by the root/App forwarding queues before this record. */
     val relayDropped: Long = 0,
+    val backtrace: SyscallBacktrace? = null,
 ) {
     val captures: List<SyscallCapture> by lazy(LazyThreadSafetyMode.NONE) {
         SyscallCaptureDecoder.decode(captureCount, capturePayload)
@@ -42,5 +43,6 @@ data class SyscallEvent(
         const val PHASE_ENTER = 1
         const val PHASE_EXIT = 2
         const val FLAG_AFTER_DROPPED = 1 shl 2
+        const val FLAG_HAS_BACKTRACE = 1 shl 5
     }
 }

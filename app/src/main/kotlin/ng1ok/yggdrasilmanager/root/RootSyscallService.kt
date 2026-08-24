@@ -71,6 +71,19 @@ class RootSyscallService : RootService() {
             returnAfter: Long,
             captureCount: Int,
             capturePayload: ByteArray,
+            backtraceFlags: Int,
+            backtraceSeq: Long,
+            backtraceDropped: Long,
+            backtraceCallId: Long,
+            backtracePhase: Int,
+            backtraceTid: Int,
+            backtraceTgid: Int,
+            backtraceSyscallNr: Int,
+            backtraceStackRequestedSize: Int,
+            backtraceStackCopiedSize: Int,
+            backtraceStackAddr: Long,
+            backtraceRegs: LongArray,
+            backtraceStack: ByteArray,
         ) {
             val pendingRelayDrops = relayDropped.getAndSet(0)
             val event = RootSyscallEvent(
@@ -94,6 +107,19 @@ class RootSyscallService : RootService() {
                     captureCount = captureCount,
                     capturePayload = capturePayload,
                     relayDropped = pendingRelayDrops,
+                    backtraceFlags = backtraceFlags,
+                    backtraceSeq = backtraceSeq,
+                    backtraceDropped = backtraceDropped,
+                    backtraceCallId = backtraceCallId,
+                    backtracePhase = backtracePhase,
+                    backtraceTid = backtraceTid,
+                    backtraceTgid = backtraceTgid,
+                    backtraceSyscallNr = backtraceSyscallNr,
+                    backtraceStackRequestedSize = backtraceStackRequestedSize,
+                    backtraceStackCopiedSize = backtraceStackCopiedSize,
+                    backtraceStackAddr = backtraceStackAddr,
+                    backtraceRegs = backtraceRegs,
+                    backtraceStack = backtraceStack,
                 )
             if (eventQueue.trySend(event).isFailure) {
                 // Preserve event order for the consumer and report this gap
@@ -115,15 +141,21 @@ class RootSyscallService : RootService() {
     }
 
     private val binder = object : IRootSyscallService.Stub() {
-        override fun setRule(syscallNr: Int, flags: Int, targetId: Long): Int {
+        override fun setRule(
+            syscallNr: Int,
+            flags: Int,
+            targetId: Long,
+            backtraceStackSize: Int,
+        ): Int {
             requireRootProcess()
             if (!isValidSetTarget(flags, targetId)) return -ERRNO_EINVAL
             if (wouldTraceObserver(flags, targetId)) return -ERRNO_EPERM
-            return YggdrasilNative.syscallConfigure(
+            return YggdrasilNative.syscallConfigureWithBacktrace(
                 op = 1,
                 flags = flags,
                 syscallNr = syscallNr,
                 targetId = targetId,
+                backtraceStackSize = backtraceStackSize,
             )
         }
 

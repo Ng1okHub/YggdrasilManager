@@ -5,6 +5,7 @@ export const MAX_PROCESS_ID = 2147483647;
 
 const SCOPES = new Set(["tgid", "tid", "uid"]);
 const PHASES = new Set(["enter", "exit", "both"]);
+const BACKTRACE_MODES = new Set(["fp", "dwarf"]);
 const SCOPE_LABELS = {
   tgid: "Process（TGID）",
   tid: "Thread（TID）",
@@ -61,6 +62,7 @@ export function initialModel() {
     selectedSyscallNr: null,
     listener: { state: "starting", error: null },
     supportedSyscalls: [],
+    backtraceMode: "fp",
     nextDisplayId: 1,
   };
 }
@@ -76,6 +78,7 @@ export function reduceServerMessage(model, message) {
       supportedSyscalls: Array.isArray(message.supportedSyscalls)
         ? normalizeSupportedSyscalls(message.supportedSyscalls)
         : model.supportedSyscalls,
+      backtraceMode: normalizeBacktraceMode(message.backtraceMode ?? model.backtraceMode),
     };
   }
   if (message?.type !== "event") return model;
@@ -99,6 +102,14 @@ export function reduceServerMessage(model, message) {
       argsBefore: Array.isArray(existing.argsBefore) ? existing.argsBefore : message.argsBefore,
       captures: [...entryCaptures, ...exitCaptures],
       afterDropped: Boolean(existing.afterDropped || message.afterDropped),
+      ...(message.backtrace || existing.backtrace
+        ? { backtrace: message.backtrace ?? existing.backtrace }
+        : {}),
+      ...(Array.isArray(message.backtraceFrames) && message.backtraceFrames.length > 0
+        ? { backtraceFrames: message.backtraceFrames }
+        : (Array.isArray(existing.backtraceFrames) && existing.backtraceFrames.length > 0
+          ? { backtraceFrames: existing.backtraceFrames }
+          : {})),
     };
     return {
       ...model,
@@ -255,7 +266,14 @@ export function selectedPackageUid(apps, packageName) {
   return app.uid;
 }
 
-export function createObserveCommand({ syscallNr, scope, targetId, phase }) {
+export function createObserveCommand({
+  syscallNr,
+  scope,
+  targetId,
+  phase,
+  captureBacktrace = false,
+  backtraceStackSize = 4096,
+}) {
   const nr = parseInteger(syscallNr, "Syscall編號");
   if (nr < 0 || nr > 459) throw new Error("Syscall編號必須介於 0 至 459");
   const normalizedScope = String(scope ?? "").toLowerCase();
@@ -277,13 +295,25 @@ export function createObserveCommand({ syscallNr, scope, targetId, phase }) {
         : `目標 ID 必須介於 1 至 ${MAX_PROCESS_ID}`,
     );
   }
+  const stackSize = parseInteger(backtraceStackSize, "Backtrace stack size");
+  if (stackSize < 0 || stackSize > 65536) {
+    throw new Error("Backtrace stack size must be between 0 and 65536");
+  }
   return {
     type: "observe",
     syscallNr: nr,
     scope: normalizedScope,
     targetId: target,
     phase: normalizedPhase,
+    ...(captureBacktrace
+      ? { backtrace: true, backtraceStackSize: stackSize }
+      : {}),
   };
+}
+
+export function normalizeBacktraceMode(value) {
+  const mode = String(value ?? "fp").trim().toLowerCase();
+  return BACKTRACE_MODES.has(mode) ? mode : "fp";
 }
 
 export function createUnobserveCommand(rule) {
@@ -375,6 +405,9 @@ function setupBrowserClient(documentRef, windowRef) {
     packageTargetField: documentRef.getElementById("package-target-field"),
     targetLabel: documentRef.getElementById("target-label"),
     targetId: documentRef.getElementById("target-id"),
+    captureBacktrace: documentRef.getElementById("capture-backtrace"),
+    backtraceStackSize: documentRef.getElementById("backtrace-stack-size"),
+    backtraceMode: documentRef.getElementById("backtrace-mode"),
     packageCombobox: documentRef.getElementById("package-combobox"),
     packageSearch: documentRef.getElementById("package-search"),
     packageOptions: documentRef.getElementById("package-options"),
@@ -408,6 +441,9 @@ function setupBrowserClient(documentRef, windowRef) {
     renderRules(documentRef, elements, model, sendCommand);
     renderEvents(documentRef, elements, model);
     renderListenerStatus(elements, model.listener);
+    if (elements.backtraceMode && elements.backtraceMode.value !== model.backtraceMode) {
+      elements.backtraceMode.value = model.backtraceMode;
+    }
   }
 
   function setConnection(state, label) {
@@ -850,6 +886,8 @@ function setupBrowserClient(documentRef, windowRef) {
         scope: elements.scope.value,
         targetId,
         phase,
+        captureBacktrace: elements.captureBacktrace?.checked === true,
+        backtraceStackSize: elements.backtraceStackSize?.value || 4096,
       });
       sendCommand(command, "規則已新增");
     } catch (error) {
@@ -863,6 +901,10 @@ function setupBrowserClient(documentRef, windowRef) {
       }
       showCommandStatus(message, true);
     }
+  });
+  elements.backtraceMode?.addEventListener("change", () => {
+    const mode = normalizeBacktraceMode(elements.backtraceMode.value);
+    sendCommand({ type: "config", backtraceMode: mode }, `Backtrace mode: ${mode}`);
   });
   elements.clearEvents.addEventListener("click", () => {
     model = clearEventsModel(model);
@@ -899,9 +941,12 @@ function renderRules(documentRef, elements, model, sendCommand) {
     const target = String(rule.scope).toLowerCase() === "global"
       ? scopeLabel(rule.scope)
       : `${scopeLabel(rule.scope)} ${rule.targetId}`;
+    const backtraceLabel = rule.backtrace
+      ? ` | bt ${rule.backtraceStackSize || 4096} B`
+      : "";
     row.append(
       summary,
-      createElement(documentRef, "div", "rule-target", `${target} | ${phaseLabel(rule.phase)}`),
+      createElement(documentRef, "div", "rule-target", `${target} | ${phaseLabel(rule.phase)}${backtraceLabel}`),
     );
     const remove = createElement(documentRef, "button", "button button--danger", "移除");
     remove.type = "button";
@@ -1099,6 +1144,37 @@ function renderEventDetails(documentRef, event) {
   }
   argsSection.append(args);
   body.append(argsSection);
+
+  const frames = Array.isArray(event.backtraceFrames) ? event.backtraceFrames : [];
+  if (event.backtrace || frames.length > 0 || event.backtraceNote) {
+    const backtraceSection = createElement(documentRef, "section", "event-backtrace");
+    const title = event.backtraceMode ? `Backtrace (${event.backtraceMode})` : "Backtrace";
+    backtraceSection.append(createElement(documentRef, "h3", "", title));
+    if (event.backtraceNote) {
+      backtraceSection.append(createElement(documentRef, "p", "backtrace-note", event.backtraceNote));
+    }
+    const frameList = createElement(documentRef, "div", "backtrace-list");
+    if (frames.length === 0) {
+      frameList.append(createElement(documentRef, "p", "empty-state", "No frames"));
+    } else {
+      frames.forEach((frame, index) => {
+        const row = createElement(documentRef, "div", "backtrace-frame");
+        const pc = frame?.pc || "-";
+        const label = frame?.label || pc;
+        row.append(
+          createElement(documentRef, "span", "backtrace-index", `#${frame?.index ?? index}`),
+          createElement(documentRef, "code", "backtrace-pc", pc),
+          createElement(documentRef, "span", "backtrace-label", label),
+        );
+        if (frame?.module) {
+          row.append(createElement(documentRef, "span", "backtrace-module", frame.module));
+        }
+        frameList.append(row);
+      });
+    }
+    backtraceSection.append(frameList);
+    body.append(backtraceSection);
+  }
 
   if (event.return !== null && event.return !== undefined) {
     const returnSection = createElement(documentRef, "section");

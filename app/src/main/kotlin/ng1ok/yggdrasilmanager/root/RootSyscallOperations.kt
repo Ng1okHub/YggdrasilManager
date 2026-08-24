@@ -59,6 +59,19 @@ internal class RootSyscallOperations(context: Context) : SyscallOperations {
                     returnAfter = value.returnAfter,
                     captureCount = value.captureCount,
                     capturePayload = value.capturePayload,
+                    backtraceFlags = value.backtraceFlags,
+                    backtraceSeq = value.backtraceSeq,
+                    backtraceDropped = value.backtraceDropped,
+                    backtraceCallId = value.backtraceCallId,
+                    backtracePhase = value.backtracePhase,
+                    backtraceTid = value.backtraceTid,
+                    backtraceTgid = value.backtraceTgid,
+                    backtraceSyscallNr = value.backtraceSyscallNr,
+                    backtraceStackRequestedSize = value.backtraceStackRequestedSize,
+                    backtraceStackCopiedSize = value.backtraceStackCopiedSize,
+                    backtraceStackAddr = value.backtraceStackAddr,
+                    backtraceRegs = value.backtraceRegs,
+                    backtraceStack = value.backtraceStack,
                 )
             } catch (_: RuntimeException) {
             }
@@ -107,6 +120,7 @@ internal class RootSyscallOperations(context: Context) : SyscallOperations {
         rule.syscallNr,
         rule.configureFlags,
         rule.targetId,
+        if (rule.captureBacktrace) rule.backtraceStackSize else 0,
     )
 
     override suspend fun deleteRule(rule: SyscallObserveRule): Int = awaitRemote().deleteRule(

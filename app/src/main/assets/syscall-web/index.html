@@ -88,6 +88,24 @@
                 <label><input type="radio" name="phase" value="both" checked> <span>Both</span></label>
               </div>
             </fieldset>
+            <fieldset class="backtrace-field">
+              <legend>Backtrace</legend>
+              <label class="backtrace-toggle">
+                <input id="capture-backtrace" name="captureBacktrace" type="checkbox">
+                <span>Capture user stack for this rule</span>
+              </label>
+              <label class="field">
+                <span>Stack snapshot size (bytes)</span>
+                <input id="backtrace-stack-size" name="backtraceStackSize" type="number" min="0" max="65536" step="8" value="4096" inputmode="numeric">
+              </label>
+              <label class="field">
+                <span>Unwind mode</span>
+                <select id="backtrace-mode" name="backtraceMode">
+                  <option value="fp" selected>Frame pointer (FP)</option>
+                  <option value="dwarf">DWARF (libunwindstack)</option>
+                </select>
+              </label>
+            </fieldset>
             <button class="button button--primary" type="submit">新增規則</button>
           </form>
           <p id="command-status" class="command-status" aria-live="polite"></p>

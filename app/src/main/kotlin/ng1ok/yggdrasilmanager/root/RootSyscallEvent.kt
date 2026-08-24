@@ -25,6 +25,19 @@ class RootSyscallEvent(
     val captureCount: Int,
     val capturePayload: ByteArray,
     val relayDropped: Long,
+    val backtraceFlags: Int = 0,
+    val backtraceSeq: Long = 0L,
+    val backtraceDropped: Long = 0L,
+    val backtraceCallId: Long = 0L,
+    val backtracePhase: Int = 0,
+    val backtraceTid: Int = 0,
+    val backtraceTgid: Int = 0,
+    val backtraceSyscallNr: Int = 0,
+    val backtraceStackRequestedSize: Int = 0,
+    val backtraceStackCopiedSize: Int = 0,
+    val backtraceStackAddr: Long = 0L,
+    val backtraceRegs: LongArray = LongArray(0),
+    val backtraceStack: ByteArray = ByteArray(0),
 ) : Parcelable {
     private constructor(source: Parcel) : this(
         seq = source.readLong(),
@@ -47,6 +60,19 @@ class RootSyscallEvent(
         captureCount = source.readInt(),
         capturePayload = source.createByteArray() ?: ByteArray(0),
         relayDropped = source.readLong(),
+        backtraceFlags = source.readInt(),
+        backtraceSeq = source.readLong(),
+        backtraceDropped = source.readLong(),
+        backtraceCallId = source.readLong(),
+        backtracePhase = source.readInt(),
+        backtraceTid = source.readInt(),
+        backtraceTgid = source.readInt(),
+        backtraceSyscallNr = source.readInt(),
+        backtraceStackRequestedSize = source.readInt(),
+        backtraceStackCopiedSize = source.readInt(),
+        backtraceStackAddr = source.readLong(),
+        backtraceRegs = source.createLongArray() ?: LongArray(0),
+        backtraceStack = source.createByteArray() ?: ByteArray(0),
     )
 
     override fun writeToParcel(dest: Parcel, flags: Int) {
@@ -70,6 +96,19 @@ class RootSyscallEvent(
         dest.writeInt(captureCount)
         dest.writeByteArray(capturePayload)
         dest.writeLong(relayDropped)
+        dest.writeInt(backtraceFlags)
+        dest.writeLong(backtraceSeq)
+        dest.writeLong(backtraceDropped)
+        dest.writeLong(backtraceCallId)
+        dest.writeInt(backtracePhase)
+        dest.writeInt(backtraceTid)
+        dest.writeInt(backtraceTgid)
+        dest.writeInt(backtraceSyscallNr)
+        dest.writeInt(backtraceStackRequestedSize)
+        dest.writeInt(backtraceStackCopiedSize)
+        dest.writeLong(backtraceStackAddr)
+        dest.writeLongArray(backtraceRegs)
+        dest.writeByteArray(backtraceStack)
     }
 
     override fun describeContents(): Int = 0

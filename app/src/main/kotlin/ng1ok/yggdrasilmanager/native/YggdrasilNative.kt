@@ -11,6 +11,13 @@ interface YggdrasilNativeApi {
     fun hwbpStartListen(callback: HwbpEventCallback)
     fun hwbpStopListen()
     fun syscallConfigure(op: Int, flags: Int, syscallNr: Int, targetId: Long): Int
+    fun syscallConfigureWithBacktrace(
+        op: Int,
+        flags: Int,
+        syscallNr: Int,
+        targetId: Long,
+        backtraceStackSize: Int,
+    ): Int = syscallConfigure(op, flags, syscallNr, targetId)
     fun syscallCaptureSupportedNumbers(): IntArray
     fun syscallStartListen(callback: SyscallEventCallback): Int
     fun syscallStopListen()
@@ -83,6 +90,19 @@ interface SyscallEventCallback {
         returnAfter: Long,
         captureCount: Int,
         capturePayload: ByteArray,
+        backtraceFlags: Int = 0,
+        backtraceSeq: Long = 0L,
+        backtraceDropped: Long = 0L,
+        backtraceCallId: Long = 0L,
+        backtracePhase: Int = 0,
+        backtraceTid: Int = 0,
+        backtraceTgid: Int = 0,
+        backtraceSyscallNr: Int = 0,
+        backtraceStackRequestedSize: Int = 0,
+        backtraceStackCopiedSize: Int = 0,
+        backtraceStackAddr: Long = 0L,
+        backtraceRegs: LongArray = LongArray(0),
+        backtraceStack: ByteArray = ByteArray(0),
     )
 
     fun onListenerFailure(error: Int)
@@ -100,6 +120,13 @@ object YggdrasilNative : YggdrasilNativeApi {
     external override fun hwbpStartListen(callback: HwbpEventCallback)
     external override fun hwbpStopListen()
     external override fun syscallConfigure(op: Int, flags: Int, syscallNr: Int, targetId: Long): Int
+    external override fun syscallConfigureWithBacktrace(
+        op: Int,
+        flags: Int,
+        syscallNr: Int,
+        targetId: Long,
+        backtraceStackSize: Int,
+    ): Int
     external override fun syscallCaptureSupportedNumbers(): IntArray
     external override fun syscallStartListen(callback: SyscallEventCallback): Int
     external override fun syscallStopListen()

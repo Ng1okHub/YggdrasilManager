@@ -303,6 +303,41 @@ form {
   padding: 0 0 6px;
 }
 
+.backtrace-field {
+  display: grid;
+  gap: 10px;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  padding: 12px;
+  min-inline-size: 0;
+  background: color-mix(in srgb, var(--surface-2) 75%, transparent);
+}
+
+.backtrace-field legend {
+  padding: 0 6px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.backtrace-toggle {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.backtrace-toggle input {
+  width: 18px;
+  min-height: 18px;
+  accent-color: var(--accent);
+}
+
 input,
 select {
   width: 100%;
@@ -1054,6 +1089,66 @@ select {
   white-space: pre-wrap;
 }
 
+.event-backtrace {
+  display: grid;
+  gap: 8px;
+}
+
+.backtrace-note {
+  margin: 0;
+  color: var(--warning);
+  font-family: var(--mono);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.backtrace-list {
+  display: grid;
+  gap: 4px;
+  max-height: 360px;
+  overflow: auto;
+  padding: 7px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.backtrace-frame {
+  display: grid;
+  grid-template-columns: 34px minmax(100px, auto) minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  padding: 5px 6px;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 65%, transparent);
+  font-family: var(--mono);
+  font-size: 11px;
+}
+
+.backtrace-frame:last-child {
+  border-bottom: 0;
+}
+
+.backtrace-index {
+  color: var(--faint);
+}
+
+.backtrace-pc {
+  color: var(--info);
+}
+
+.backtrace-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backtrace-module {
+  color: var(--muted);
+  white-space: nowrap;
+}
+
 .event-detail-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -1177,6 +1272,15 @@ select {
 
   .event-arg--captured {
     grid-column: auto;
+  }
+
+  .backtrace-frame {
+    grid-template-columns: 30px minmax(0, 1fr);
+  }
+
+  .backtrace-label,
+  .backtrace-module {
+    grid-column: 2;
   }
 }
 
