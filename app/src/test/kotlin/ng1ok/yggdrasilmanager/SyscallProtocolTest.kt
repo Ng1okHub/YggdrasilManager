@@ -22,6 +22,7 @@ import ng1ok.yggdrasilmanager.ui.syscall.encodeSyscallAck
 import ng1ok.yggdrasilmanager.ui.syscall.encodeSyscallEvent
 import ng1ok.yggdrasilmanager.ui.syscall.encodeSyscallState
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -51,6 +52,24 @@ class SyscallProtocolTest {
         assertTrue(backtraceObserve.rule.captureBacktrace)
         assertEquals(8192, backtraceObserve.rule.backtraceStackSize)
         assertTrue(backtraceObserve.rule.configureFlags and SyscallObserveRule.FLAG_CAPTURE_BACKTRACE != 0)
+
+        val invalidStackSize = decodeSyscallClientCommand(
+            """{"type":"observe","syscallNr":64,"scope":"tgid","targetId":1234,"phase":"enter","backtraceStackSize":8192}""",
+        )
+        assertEquals("backtraceStackSize requires backtrace", invalidStackSize.exceptionOrNull()?.message)
+        assertEquals(
+            "backtraceStackSize requires backtrace",
+            assertThrows(IllegalArgumentException::class.java) {
+                SyscallObserveRule(
+                    64,
+                    SyscallScope.TGID,
+                    1234,
+                    SyscallTracePhase.ENTER,
+                    captureBacktrace = false,
+                    backtraceStackSize = 8192,
+                )
+            }.message,
+        )
 
         val unobserve = decodeSyscallClientCommand(
             """{"type":"unobserve","syscallNr":93,"scope":"global"}""",

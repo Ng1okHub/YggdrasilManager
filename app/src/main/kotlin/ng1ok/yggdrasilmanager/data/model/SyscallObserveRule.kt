@@ -32,7 +32,7 @@ data class SyscallObserveRule(
     val targetId: Long,
     val phase: SyscallTracePhase,
     val captureBacktrace: Boolean = false,
-    val backtraceStackSize: Int = SyscallBacktrace.DEFAULT_STACK_SIZE,
+    val backtraceStackSize: Int = 0,
 ) {
     init {
         require(syscallNr in 0 until ARM64_SYSCALL_COUNT) {
@@ -56,6 +56,9 @@ data class SyscallObserveRule(
         }
         require(backtraceStackSize in 0..SyscallBacktrace.MAX_STACK_SIZE) {
             "backtrace stack size must be between 0 and ${SyscallBacktrace.MAX_STACK_SIZE}"
+        }
+        require(captureBacktrace || backtraceStackSize == 0) {
+            "backtraceStackSize requires backtrace"
         }
     }
 

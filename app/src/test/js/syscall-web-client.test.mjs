@@ -317,6 +317,35 @@ test("observe only accepts scoped positive targets and valid syscall phases", ()
       phase: "both",
     },
   );
+  assert.throws(
+    () => createObserveCommand({
+      syscallNr: 64,
+      scope: "tgid",
+      targetId: 4321,
+      phase: "enter",
+      backtraceStackSize: 8192,
+    }),
+    /backtraceStackSize requires backtrace/,
+  );
+  assert.deepEqual(
+    createObserveCommand({
+      syscallNr: 64,
+      scope: "tgid",
+      targetId: 4321,
+      phase: "enter",
+      captureBacktrace: true,
+      backtraceStackSize: 8192,
+    }),
+    {
+      type: "observe",
+      syscallNr: 64,
+      scope: "tgid",
+      targetId: 4321,
+      phase: "enter",
+      backtrace: true,
+      backtraceStackSize: 8192,
+    },
+  );
   assert.deepEqual(
     createObserveCommand({
       syscallNr: 63,

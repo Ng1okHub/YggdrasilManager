@@ -96,8 +96,16 @@ private fun decodeRule(
     val captureBacktrace = root["backtrace"]?.jsonPrimitive?.booleanOrNull
         ?: root["captureBacktrace"]?.jsonPrimitive?.booleanOrNull
         ?: false
-    val backtraceStackSize = root["backtraceStackSize"]?.jsonPrimitive?.intOrNull
-        ?: SyscallBacktrace.DEFAULT_STACK_SIZE
+    val stackSizeElement = root["backtraceStackSize"]
+    require(captureBacktrace || stackSizeElement == null) {
+        "backtraceStackSize requires backtrace"
+    }
+    val backtraceStackSize = if (captureBacktrace) {
+        stackSizeElement?.jsonPrimitive?.intOrNull
+            ?: SyscallBacktrace.DEFAULT_STACK_SIZE
+    } else {
+        0
+    }
     return SyscallObserveRule(
         syscallNr = syscallNr,
         scope = scope,

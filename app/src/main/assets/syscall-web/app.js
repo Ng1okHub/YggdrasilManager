@@ -272,7 +272,7 @@ export function createObserveCommand({
   targetId,
   phase,
   captureBacktrace = false,
-  backtraceStackSize = 4096,
+  backtraceStackSize,
 }) {
   const nr = parseInteger(syscallNr, "Syscall編號");
   if (nr < 0 || nr > 459) throw new Error("Syscall編號必須介於 0 至 459");
@@ -295,7 +295,12 @@ export function createObserveCommand({
         : `目標 ID 必須介於 1 至 ${MAX_PROCESS_ID}`,
     );
   }
-  const stackSize = parseInteger(backtraceStackSize, "Backtrace stack size");
+  if (!captureBacktrace && backtraceStackSize !== undefined) {
+    throw new Error("backtraceStackSize requires backtrace");
+  }
+  const stackSize = captureBacktrace
+    ? parseInteger(backtraceStackSize ?? 4096, "Backtrace stack size")
+    : 0;
   if (stackSize < 0 || stackSize > 65536) {
     throw new Error("Backtrace stack size must be between 0 and 65536");
   }
@@ -799,6 +804,12 @@ function setupBrowserClient(documentRef, windowRef) {
     if (isUid && appsLoadState === "idle") loadInstalledApps();
   }
 
+  function syncBacktraceCapture() {
+    if (elements.backtraceStackSize) {
+      elements.backtraceStackSize.disabled = elements.captureBacktrace?.checked !== true;
+    }
+  }
+
   function scheduleReconnect() {
     if (reconnectTimer !== null) return;
     reconnectTimer = windowRef.setTimeout(() => {
@@ -848,6 +859,7 @@ function setupBrowserClient(documentRef, windowRef) {
   }
 
   elements.scope.addEventListener("change", updateScope);
+  elements.captureBacktrace?.addEventListener("change", syncBacktraceCapture);
   elements.packageSearch.addEventListener("focus", openPackageMenu);
   elements.packageSearch.addEventListener("click", openPackageMenu);
   elements.packageSearch.addEventListener("input", () => {
@@ -887,7 +899,9 @@ function setupBrowserClient(documentRef, windowRef) {
         targetId,
         phase,
         captureBacktrace: elements.captureBacktrace?.checked === true,
-        backtraceStackSize: elements.backtraceStackSize?.value || 4096,
+        backtraceStackSize: elements.captureBacktrace?.checked
+          ? (elements.backtraceStackSize?.value || 4096)
+          : undefined,
       });
       sendCommand(command, "規則已新增");
     } catch (error) {
@@ -920,6 +934,7 @@ function setupBrowserClient(documentRef, windowRef) {
 
   render();
   updateScope();
+  syncBacktraceCapture();
   connect();
 }
 
