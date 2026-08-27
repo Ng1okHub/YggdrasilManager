@@ -60,6 +60,7 @@ export function initialModel() {
     rules: [],
     events: [],
     selectedSyscallNr: null,
+    eventSearchQuery: "",
     listener: { state: "starting", error: null },
     supportedSyscalls: [],
     backtraceMode: "fp",
@@ -193,11 +194,58 @@ export function filterEventsBySyscall(events, selectedSyscallNr) {
   return (Array.isArray(events) ? events : []).filter((event) => Number(event?.syscallNr) === nr);
 }
 
+/** 以大小寫不敏感的方式搜尋事件內容；空白分隔的詞必須全部出現在同一筆記錄。 */
+export function filterEventsBySearch(events, query) {
+  const source = Array.isArray(events) ? events : [];
+  const terms = normalizeEventSearchQuery(query)
+    .toLowerCase()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (terms.length === 0) return source;
+
+  return source.filter((event) => {
+    const searchableText = eventSearchText(event);
+    return terms.every((term) => searchableText.includes(term));
+  });
+}
+
+export function normalizeEventSearchQuery(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function eventSearchText(event) {
+  if (!event || typeof event !== "object") return "";
+  const values = [];
+  const collect = (value) => {
+    if (value === null || value === undefined) return;
+    if (Array.isArray(value)) {
+      value.forEach(collect);
+      return;
+    }
+    if (typeof value === "object") {
+      Object.values(value).forEach(collect);
+      return;
+    }
+    values.push(String(value));
+  };
+  collect(event);
+  values.push(syscallName(event.syscallNr), event.name);
+  return values.filter(Boolean).join(" ").toLowerCase();
+}
+
 /** 切換事件篩選器；無效選項會回退到目前規則中的第一個 syscall。 */
 export function selectEventSyscall(model, syscallNr) {
   return {
     ...model,
     selectedSyscallNr: selectedSyscallForRules(model.rules, syscallNr),
+  };
+}
+
+/** 更新呼叫記錄搜索詞，保留原始輸入以免鍵入空格時游標跳動。 */
+export function selectEventSearch(model, query) {
+  return {
+    ...model,
+    eventSearchQuery: typeof query === "string" ? query : "",
   };
 }
 
@@ -423,6 +471,7 @@ function setupBrowserClient(documentRef, windowRef) {
     eventList: documentRef.getElementById("event-list"),
     eventCount: documentRef.getElementById("event-count"),
     eventSyscallFilter: documentRef.getElementById("event-syscall-filter"),
+    eventSearch: documentRef.getElementById("event-search"),
     clearEvents: documentRef.getElementById("clear-events"),
     listenerStatus: documentRef.getElementById("listener-status"),
     restartListener: documentRef.getElementById("restart-listener"),
@@ -928,6 +977,10 @@ function setupBrowserClient(documentRef, windowRef) {
     model = selectEventSyscall(model, elements.eventSyscallFilter.value);
     renderEvents(documentRef, elements, model);
   });
+  elements.eventSearch.addEventListener("input", () => {
+    model = selectEventSearch(model, elements.eventSearch.value);
+    renderEvents(documentRef, elements, model);
+  });
   elements.restartListener.addEventListener("click", () => {
     sendCommand({ type: "restartListener" }, "已請求重新啟動讀取器");
   });
@@ -992,9 +1045,14 @@ function renderEvents(documentRef, elements, model) {
   const allEvents = Array.isArray(model.events) ? model.events : [];
   const options = observedSyscallsFromRules(model.rules);
   const selectedSyscallNr = selectedSyscallForRules(model.rules, model.selectedSyscallNr);
-  const events = filterEventsBySyscall(allEvents, selectedSyscallNr);
+  const syscallEvents = filterEventsBySyscall(allEvents, selectedSyscallNr);
+  const events = filterEventsBySearch(syscallEvents, model.eventSearchQuery);
   const list = elements.eventList;
   renderEventSyscallFilter(documentRef, elements.eventSyscallFilter, options, selectedSyscallNr);
+  elements.eventSearch.disabled = selectedSyscallNr === null;
+  if (elements.eventSearch.value !== model.eventSearchQuery) {
+    elements.eventSearch.value = model.eventSearchQuery;
+  }
   elements.eventCount.textContent = String(events.length);
   list.setAttribute(
     "aria-label",
@@ -1030,7 +1088,11 @@ function renderEvents(documentRef, elements, model) {
   if (events.length === 0) {
     const selected = options.find((entry) => entry.nr === selectedSyscallNr);
     const label = selected ? `${selected.nr} ${selected.name}` : String(selectedSyscallNr);
-    list.replaceChildren(createElement(documentRef, "p", "empty-state", `尚未收到 ${label} 的呼叫紀錄`));
+    const query = normalizeEventSearchQuery(model.eventSearchQuery);
+    const message = query && syscallEvents.length > 0
+      ? `找不到符合「${query}」的呼叫紀錄`
+      : `尚未收到 ${label} 的呼叫紀錄`;
+    list.replaceChildren(createElement(documentRef, "p", "empty-state", message));
     return;
   }
 

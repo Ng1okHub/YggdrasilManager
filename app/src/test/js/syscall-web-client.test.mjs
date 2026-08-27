@@ -6,6 +6,7 @@ import {
   MAX_UID,
   createObserveCommand,
   createUnobserveCommand,
+  filterEventsBySearch,
   filterEventsBySyscall,
   filterInstalledApps,
   formatCapture,
@@ -15,6 +16,7 @@ import {
   normalizeSupportedSyscalls,
   observedSyscallsFromRules,
   reduceServerMessage,
+  selectEventSearch,
   selectEventSyscall,
   selectedPackageUid,
 } from "../../main/assets/syscall-web/app.js";
@@ -299,6 +301,40 @@ test("event filtering only returns records for the selected syscall", () => {
     [1, 3],
   );
   assert.deepEqual(filterEventsBySyscall(events, null), []);
+});
+
+test("event search matches all record values case-insensitively and supports multiple terms", () => {
+  const events = [
+    event({
+      displayId: 1,
+      syscallNr: 56,
+      name: "openat",
+      comm: "RenderThread",
+      tid: 42,
+      args: ["0x7ff000", "0x2"],
+    }),
+    event({
+      displayId: 2,
+      syscallNr: 63,
+      name: "read",
+      comm: "Binder",
+      tid: 7,
+    }),
+  ];
+
+  assert.deepEqual(filterEventsBySearch(events, "OPENAT"), [events[0]]);
+  assert.deepEqual(filterEventsBySearch(events, "renderthread 42"), [events[0]]);
+  assert.deepEqual(filterEventsBySearch(events, "0x7FF000"), [events[0]]);
+  assert.deepEqual(filterEventsBySearch(events, "   "), events);
+  assert.deepEqual(filterEventsBySearch(events, "missing"), []);
+});
+
+test("event search selection preserves typed spaces and survives unrelated model updates", () => {
+  let model = selectEventSearch(initialModel(), "  read  ");
+  assert.equal(model.eventSearchQuery, "  read  ");
+
+  model = reduceServerMessage(model, event({ syscallNr: 63 }));
+  assert.equal(model.eventSearchQuery, "  read  ");
 });
 
 test("observe only accepts scoped positive targets and valid syscall phases", () => {
