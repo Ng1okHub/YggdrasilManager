@@ -431,7 +431,9 @@ internal class SyscallWebServer(
 
     private suspend fun loadAsset(path: String): ByteArray? = withContext(Dispatchers.IO) {
         try {
-            context.assets.open("syscall-web/$path").use { stream -> stream.readBytes() }
+            // HWBP and Syscall share the same Vite/Preact bundle.  The bundle
+            // selects the feature from the server port (or an explicit query).
+            context.assets.open("observe-web/$path").use { stream -> stream.readBytes() }
         } catch (_: IOException) {
             null
         }
