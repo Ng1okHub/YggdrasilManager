@@ -18,6 +18,9 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
+import ng1ok.yggdrasilmanager.data.model.MapsPolicy
+import ng1ok.yggdrasilmanager.data.model.MapsRule
+import ng1ok.yggdrasilmanager.data.model.MapsScope
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
 import ng1ok.yggdrasilmanager.data.model.SyscallBacktrace
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerState
@@ -29,6 +32,7 @@ import ng1ok.yggdrasilmanager.native.SyscallEventCallback
 import ng1ok.yggdrasilmanager.native.YggdrasilNative
 import ng1ok.yggdrasilmanager.native.YggdrasilNativeApi
 import ng1ok.yggdrasilmanager.root.RootHwbpOperations
+import ng1ok.yggdrasilmanager.root.RootMapsOperations
 import ng1ok.yggdrasilmanager.root.RootSyscallOperations
 
 class YggdrasilRepository(
@@ -39,12 +43,17 @@ class YggdrasilRepository(
 ) {
     private val localHwbpOperations = LocalHwbpOperations(native)
     private val localSyscallOperations = LocalSyscallOperations(native)
+    private val localMapsOperations = LocalMapsOperations(native)
 
     @Volatile
     private var hwbpOperations: HwbpOperations = localHwbpOperations
 
     @Volatile
     private var syscallOperations: SyscallOperations = localSyscallOperations
+
+    @Volatile
+    private var mapsOperations: MapsOperations = localMapsOperations
+    private val mapsMutex = Mutex()
 
     /*
      * Native callbacks must return quickly so the next kernel event can be read.
@@ -117,6 +126,15 @@ class YggdrasilRepository(
         synchronized(this) {
             if (syscallOperations === localSyscallOperations) {
                 syscallOperations = RootSyscallOperations(context)
+            }
+        }
+    }
+
+    /** Makes every maps policy call execute in one libsu root process. */
+    internal fun useRootMaps(context: Context) {
+        synchronized(this) {
+            if (mapsOperations === localMapsOperations) {
+                mapsOperations = RootMapsOperations(context)
             }
         }
     }
@@ -353,6 +371,101 @@ class YggdrasilRepository(
     suspend fun setHideDbg(enable: Boolean, uid: Int?): Result<Unit> = withContext(Dispatchers.IO) {
         val ret = native.hideDbg(enable, uid != null, uid ?: 0)
         if (ret == 0) Result.success(Unit) else Result.failure(RuntimeException("prctl errno ${-ret}"))
+    }
+
+    suspend fun addMapsRule(pid: Int?, rule: MapsRule): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            mapsMutex.withLock {
+                runMapsMutation {
+                    validateMapsPid(pid)
+                    mapsOperations.addRule(pid, validateMapsRule(rule))
+                }
+            }
+        }
+
+    suspend fun removeMapsRule(pid: Int?, rule: MapsRule): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            mapsMutex.withLock {
+                runMapsMutation {
+                    validateMapsPid(pid)
+                    mapsOperations.removeRule(pid, validateMapsRule(rule))
+                }
+            }
+        }
+
+    suspend fun clearMaps(pid: Int?, allScopes: Boolean = false): Result<Unit> =
+        withContext(Dispatchers.IO) {
+            mapsMutex.withLock {
+                runMapsMutation {
+                    require(!(allScopes && pid != null)) {
+                        "清除所有範圍時不能指定 PID"
+                    }
+                    validateMapsPid(pid)
+                    mapsOperations.clear(pid, allScopes)
+                }
+            }
+        }
+
+    suspend fun getMaps(pid: Int?): Result<MapsScope> = withContext(Dispatchers.IO) {
+        mapsMutex.withLock {
+            try {
+                validateMapsPid(pid)
+                mapsOperations.get(pid)?.let(Result.Companion::success)
+                    ?: Result.failure(IllegalStateException("Maps 規則查詢失敗"))
+            } catch (failure: Exception) {
+                Result.failure(failure)
+            }
+        }
+    }
+
+    private suspend fun runMapsMutation(block: suspend () -> Int): Result<Unit> = try {
+        val ret = block()
+        if (ret == 0) Result.success(Unit)
+        else Result.failure(RuntimeException("prctl errno ${-ret}"))
+    } catch (failure: Exception) {
+        Result.failure(failure)
+    }
+
+    private fun validateMapsRule(rule: MapsRule): MapsRule {
+        require(rule.action == MapsPolicy.ACTION_HIDE || rule.action == MapsPolicy.ACTION_REWRITE_PERMS) {
+            "不支援的 Maps 動作"
+        }
+        require(rule.matchKind in MapsPolicy.MATCH_ANY..MapsPolicy.MATCH_ADDR_RANGE) {
+            "不支援的 Maps 匹配類型"
+        }
+        require(rule.pattern.length <= MapsPolicy.MAX_PATTERN_LENGTH && '\u0000' !in rule.pattern) {
+            "路徑樣式過長或包含 NUL 字元"
+        }
+        if (rule.matchKind == MapsPolicy.MATCH_ANY || rule.matchKind == MapsPolicy.MATCH_ADDR_RANGE) {
+            require(rule.matchKind == MapsPolicy.MATCH_ADDR_RANGE || rule.pattern.isEmpty()) {
+                "此匹配類型不使用路徑樣式"
+            }
+        } else {
+            require(rule.pattern.isNotEmpty()) { "路徑匹配需要填寫路徑樣式" }
+        }
+        if (rule.matchKind == MapsPolicy.MATCH_ADDR_RANGE) {
+            require(rule.addrStart >= 0 && rule.addrEnd > rule.addrStart) {
+                "位址範圍不能為空"
+            }
+        }
+        rule.matchPerms?.let(::validateMapsPermissions)
+        if (rule.action == MapsPolicy.ACTION_REWRITE_PERMS) {
+            requireNotNull(rule.setPerms) { "改寫權限時必須填寫設定權限" }
+            validateMapsPermissions(rule.setPerms)
+        } else {
+            require(rule.setPerms == null) { "隱藏動作不能設定權限" }
+        }
+        return rule
+    }
+
+    private fun validateMapsPermissions(value: String) {
+        require(value.length == 3 && value.all { it == 'r' || it == 'w' || it == 'x' || it == '-' }) {
+            "權限必須是三個 rwx 或 - 字元"
+        }
+    }
+
+    private fun validateMapsPid(pid: Int?) {
+        require(pid == null || pid > 0) { "Maps PID 必須是正整數" }
     }
 
     fun startEventStream() {

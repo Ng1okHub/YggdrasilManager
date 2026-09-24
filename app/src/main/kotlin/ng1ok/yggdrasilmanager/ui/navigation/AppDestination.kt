@@ -15,7 +15,8 @@ enum class AppDestination(
     Features("features", "功能", true, Icons.AutoMirrored.Filled.List),
     Hwbp("hwbp", "HWBP Observe", false),
     Syscall("syscall", "Arm64 Syscall Observe", false),
-    HideDbg("hidedbg", "Hide DBG", false);
+    HideDbg("hidedbg", "Hide DBG", false),
+    Maps("maps", "Hide Maps", false);
 
     val showBackButton: Boolean
         get() = !isTopLevel

@@ -20,6 +20,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.Map
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
@@ -63,6 +64,12 @@ private val features = listOf(
         category = "調試防護",
         description = "隱藏調試器狀態，支持全局模式和按 App 精確控制",
         icon = Icons.Default.BugReport
+    ),
+    FeatureItem(
+        destination = AppDestination.Maps,
+        category = "記憶體映射防護",
+        description = "依路徑、位址範圍或程序隱藏映射，或改寫其顯示權限",
+        icon = Icons.Default.Map
     )
 )
 

@@ -14,7 +14,8 @@ class AppDestinationTest {
                 Triple("features", "功能", true),
                 Triple("hwbp", "HWBP Observe", false),
                 Triple("syscall", "Arm64 Syscall Observe", false),
-                Triple("hidedbg", "Hide DBG", false)
+                Triple("hidedbg", "Hide DBG", false),
+                Triple("maps", "Hide Maps", false)
             ),
             AppDestination.entries.map { Triple(it.route, it.title, it.isTopLevel) }
         )
@@ -34,7 +35,7 @@ class AppDestinationTest {
 
     @Test
     fun childDestinationsShowBackButtonWithoutBottomNavigation() {
-        listOf(AppDestination.Hwbp, AppDestination.Syscall, AppDestination.HideDbg).forEach { destination ->
+        listOf(AppDestination.Hwbp, AppDestination.Syscall, AppDestination.HideDbg, AppDestination.Maps).forEach { destination ->
             assertTrue(destination.showBackButton)
             assertFalse(destination.showBottomNavigation)
         }

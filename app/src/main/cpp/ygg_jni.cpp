@@ -259,6 +259,118 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hideDbg(
     return (jint)(ret < 0 ? -errno : 0);
 }
 
+static bool copy_maps_string(JNIEnv *env, jstring value, char *dst, size_t capacity) {
+    if (!value || !dst || capacity == 0) return false;
+    const char *text = env->GetStringUTFChars(value, nullptr);
+    if (!text) return false;
+    const size_t length = strlen(text);
+    const bool valid = length < capacity;
+    if (valid) {
+        memcpy(dst, text, length);
+        dst[length] = '\0';
+    }
+    env->ReleaseStringUTFChars(value, text);
+    return valid;
+}
+
+static jint maps_rule_impl(
+        JNIEnv *env, uint32_t op, jboolean has_pid, jint pid,
+        jint action, jint match_kind, jint rule_flags,
+        jstring match_perms, jstring set_perms,
+        jlong addr_start, jlong addr_end, jstring pattern) {
+    struct ygg_maps_request req = {};
+    req.size = sizeof(req);
+    req.version = YGG_MAPS_ABI_VERSION;
+    req.op = op;
+    if (has_pid) {
+        if (pid <= 0) return -EINVAL;
+        req.flags = YGG_MAPS_F_TARGET_PID;
+        req.pid = static_cast<uint32_t>(pid);
+    }
+    req.rule.action = static_cast<uint32_t>(action);
+    req.rule.match_kind = static_cast<uint32_t>(match_kind);
+    req.rule.rule_flags = static_cast<uint32_t>(rule_flags);
+    req.rule.addr_start = static_cast<uint64_t>(addr_start);
+    req.rule.addr_end = static_cast<uint64_t>(addr_end);
+    if (!copy_maps_string(env, match_perms, req.rule.match_perms,
+                          sizeof(req.rule.match_perms)) ||
+        !copy_maps_string(env, set_perms, req.rule.set_perms,
+                          sizeof(req.rule.set_perms)) ||
+        !copy_maps_string(env, pattern, req.rule.pattern,
+                          sizeof(req.rule.pattern))) {
+        return -EINVAL;
+    }
+    const long ret = prctl(PR_YGGDRASIL_MAPS_POLICY, &req, 0, 0, 0);
+    return static_cast<jint>(ret < 0 ? -errno : 0);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_mapsAddRule(
+        JNIEnv *env, jobject, jboolean has_pid, jint pid,
+        jint action, jint match_kind, jint rule_flags,
+        jstring match_perms, jstring set_perms,
+        jlong addr_start, jlong addr_end, jstring pattern) {
+    return maps_rule_impl(env, YGG_MAPS_OP_ADD_RULE, has_pid, pid, action,
+                          match_kind, rule_flags, match_perms, set_perms,
+                          addr_start, addr_end, pattern);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_mapsRemoveRule(
+        JNIEnv *env, jobject, jboolean has_pid, jint pid,
+        jint action, jint match_kind, jint rule_flags,
+        jstring match_perms, jstring set_perms,
+        jlong addr_start, jlong addr_end, jstring pattern) {
+    return maps_rule_impl(env, YGG_MAPS_OP_REMOVE_RULE, has_pid, pid, action,
+                          match_kind, rule_flags, match_perms, set_perms,
+                          addr_start, addr_end, pattern);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_mapsClear(
+        JNIEnv *, jobject, jboolean has_pid, jint pid, jboolean all_scopes) {
+    struct ygg_maps_request req = {};
+    req.size = sizeof(req);
+    req.version = YGG_MAPS_ABI_VERSION;
+    req.op = YGG_MAPS_OP_CLEAR;
+    if (has_pid) {
+        if (pid <= 0 || all_scopes) return -EINVAL;
+        req.flags = YGG_MAPS_F_TARGET_PID;
+        req.pid = static_cast<uint32_t>(pid);
+    } else if (all_scopes) {
+        req.flags = YGG_MAPS_F_ALL_SCOPES;
+    }
+    const long ret = prctl(PR_YGGDRASIL_MAPS_POLICY, &req, 0, 0, 0);
+    return static_cast<jint>(ret < 0 ? -errno : 0);
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_mapsGet(
+        JNIEnv *env, jobject, jboolean has_pid, jint pid) {
+    if (has_pid && pid <= 0) return nullptr;
+    std::vector<uint8_t> buffer(
+        sizeof(struct ygg_maps_dump) +
+        YGG_MAPS_MAX_RULES * sizeof(struct ygg_maps_rule));
+    struct ygg_maps_request req = {};
+    req.size = sizeof(req);
+    req.version = YGG_MAPS_ABI_VERSION;
+    req.op = YGG_MAPS_OP_GET;
+    if (has_pid) {
+        req.flags = YGG_MAPS_F_TARGET_PID;
+        req.pid = static_cast<uint32_t>(pid);
+    }
+    req.buffer = reinterpret_cast<uint64_t>(buffer.data());
+    req.buffer_size = static_cast<uint32_t>(buffer.size());
+    const long ret = prctl(PR_YGGDRASIL_MAPS_POLICY, &req, 0, 0, 0);
+    if (ret < 0) return nullptr;
+    jbyteArray result = env->NewByteArray(static_cast<jsize>(buffer.size()));
+    if (!result) return nullptr;
+    env->SetByteArrayRegion(
+        result, 0, static_cast<jsize>(buffer.size()),
+        reinterpret_cast<const jbyte *>(buffer.data()));
+    return result;
+}
+
 static jint syscall_configure_impl(
         jint op, jint flags, jint syscallNr, jlong targetId,
         jint backtrace_stack_size) {

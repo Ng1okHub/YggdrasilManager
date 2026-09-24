@@ -22,6 +22,32 @@ interface YggdrasilNativeApi {
     fun syscallStartListen(callback: SyscallEventCallback): Int
     fun syscallStopListen()
     fun hideDbg(enable: Boolean, hasUid: Boolean, uid: Int): Int
+    fun mapsAddRule(
+        hasPid: Boolean,
+        pid: Int,
+        action: Int,
+        matchKind: Int,
+        ruleFlags: Int,
+        matchPerms: String,
+        setPerms: String,
+        addrStart: Long,
+        addrEnd: Long,
+        pattern: String,
+    ): Int = -38
+    fun mapsRemoveRule(
+        hasPid: Boolean,
+        pid: Int,
+        action: Int,
+        matchKind: Int,
+        ruleFlags: Int,
+        matchPerms: String,
+        setPerms: String,
+        addrStart: Long,
+        addrEnd: Long,
+        pattern: String,
+    ): Int = -38
+    fun mapsClear(hasPid: Boolean, pid: Int, allScopes: Boolean): Int = -38
+    fun mapsGet(hasPid: Boolean, pid: Int): ByteArray? = null
     fun hwbpUnwindDwarf(
         pid: Int,
         flags: Int,
@@ -131,6 +157,32 @@ object YggdrasilNative : YggdrasilNativeApi {
     external override fun syscallStartListen(callback: SyscallEventCallback): Int
     external override fun syscallStopListen()
     external override fun hideDbg(enable: Boolean, hasUid: Boolean, uid: Int): Int
+    external override fun mapsAddRule(
+        hasPid: Boolean,
+        pid: Int,
+        action: Int,
+        matchKind: Int,
+        ruleFlags: Int,
+        matchPerms: String,
+        setPerms: String,
+        addrStart: Long,
+        addrEnd: Long,
+        pattern: String,
+    ): Int
+    external override fun mapsRemoveRule(
+        hasPid: Boolean,
+        pid: Int,
+        action: Int,
+        matchKind: Int,
+        ruleFlags: Int,
+        matchPerms: String,
+        setPerms: String,
+        addrStart: Long,
+        addrEnd: Long,
+        pattern: String,
+    ): Int
+    external override fun mapsClear(hasPid: Boolean, pid: Int, allScopes: Boolean): Int
+    external override fun mapsGet(hasPid: Boolean, pid: Int): ByteArray?
 
     override fun hwbpUnwindDwarf(
         pid: Int,

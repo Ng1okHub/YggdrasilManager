@@ -36,9 +36,9 @@ typedef uint32_t u32;
 #define PR_YGGDRASIL_SYSCALL_READ_EVENT 0x5947000D
 
 /* Version code returned by PR_YGGDRASIL_GET_VERSION: (major << 16) | (minor << 8) | patch */
-#define YGG_VERSION_MAJOR  1
-#define YGG_VERSION_MINOR  3
-#define YGG_VERSION_PATCH  0
+#define YGG_VERSION_MAJOR  2
+#define YGG_VERSION_MINOR  1
+#define YGG_VERSION_PATCH  3
 #define YGG_VERSION_CODE   ((YGG_VERSION_MAJOR << 16) | (YGG_VERSION_MINOR << 8) | YGG_VERSION_PATCH)
 
 #define YGG__STR(x)        #x
@@ -47,8 +47,6 @@ typedef uint32_t u32;
     YGG__XSTR(YGG_VERSION_MAJOR) "." YGG__XSTR(YGG_VERSION_MINOR) "." YGG__XSTR(YGG_VERSION_PATCH)
 
 #define YGG_HIDE_DBG_F_TARGET_UID    (1U << 0)
-#define YGG_HIDE_MAPS_F_TARGET_PID   (1U << 0)
-
 struct ygg_hide_dbg_request {
     uint32_t enable;
     uint32_t flags;
@@ -56,22 +54,69 @@ struct ygg_hide_dbg_request {
     uint32_t reserved;
 };
 
-enum ygg_hide_maps_op {
-    YGG_HIDE_MAPS_OP_SET_PERMS = 1,
-    YGG_HIDE_MAPS_OP_CLEAR_PERMS = 2,
-    YGG_HIDE_MAPS_OP_ADD_PATH_FILTER = 3,
-    YGG_HIDE_MAPS_OP_CLEAR_PATH_FILTERS = 4,
-    YGG_HIDE_MAPS_OP_CLEAR_SCOPE = 5,
+/* Maps presentation policy ABI, shared with the current KPM. */
+#define PR_YGGDRASIL_MAPS_POLICY     PR_YGGDRASIL_HIDE_MAPS
+#define YGG_MAPS_ABI_VERSION         2U
+#define YGG_MAPS_F_TARGET_PID        (1U << 0)
+#define YGG_MAPS_F_ALL_SCOPES        (1U << 1)
+#define YGG_MAPS_MAX_RULES           32U
+#define YGG_MAPS_PATTERN_MAX         128U
+
+enum ygg_maps_op {
+    YGG_MAPS_OP_ADD_RULE = 1,
+    YGG_MAPS_OP_REMOVE_RULE = 2,
+    YGG_MAPS_OP_CLEAR = 3,
+    YGG_MAPS_OP_GET = 4,
 };
 
-struct ygg_hide_maps_request {
+enum ygg_maps_action {
+    YGG_MAPS_ACTION_HIDE = 1,
+    YGG_MAPS_ACTION_REWRITE_PERMS = 2,
+};
+
+enum ygg_maps_match_kind {
+    YGG_MAPS_MATCH_ANY = 0,
+    YGG_MAPS_MATCH_PATH_SUBSTR = 1,
+    YGG_MAPS_MATCH_PATH_PREFIX = 2,
+    YGG_MAPS_MATCH_PATH_EXACT = 3,
+    YGG_MAPS_MATCH_PATH_BASENAME = 4,
+    YGG_MAPS_MATCH_ADDR_RANGE = 5,
+};
+
+#define YGG_MAPS_RULE_F_MATCH_PERMS  (1U << 0)
+
+struct ygg_maps_rule {
+    uint32_t action;
+    uint32_t match_kind;
+    uint32_t rule_flags;
+    uint32_t reserved;
+    char match_perms[4];
+    char set_perms[4];
+    uint64_t addr_start;
+    uint64_t addr_end;
+    char pattern[YGG_MAPS_PATTERN_MAX];
+};
+
+struct ygg_maps_request {
+    uint32_t size;
+    uint32_t version;
     uint32_t op;
     uint32_t flags;
     uint32_t pid;
     uint32_t reserved;
-    char match_perms[4];
-    char set_perms[4];
-    char path_filter[128];
+    struct ygg_maps_rule rule;
+    uint64_t buffer;
+    uint32_t buffer_size;
+    uint32_t reserved2;
+};
+
+struct ygg_maps_dump {
+    uint32_t size;
+    uint32_t version;
+    uint32_t scope_global;
+    uint32_t total_rules;
+    uint32_t copied_rules;
+    uint32_t reserved;
 };
 
 #define YGG_SYSCALL_ARG_COUNT            6U
