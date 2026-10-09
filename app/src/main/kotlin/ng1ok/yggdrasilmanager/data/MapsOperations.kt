@@ -3,7 +3,7 @@ package ng1ok.yggdrasilmanager.data
 import ng1ok.yggdrasilmanager.data.model.MapsRule
 import ng1ok.yggdrasilmanager.data.model.MapsScope
 
-/** Process boundary used by the maps policy repository. */
+/** Process seam used by the Maps policy module's local and root adapters. */
 interface MapsOperations {
     /** Adds [rule] to the global scope or the selected process scope. */
     suspend fun addRule(pid: Int?, rule: MapsRule): Int

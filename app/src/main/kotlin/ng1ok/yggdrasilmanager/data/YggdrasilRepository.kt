@@ -18,9 +18,11 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
-import ng1ok.yggdrasilmanager.data.model.MapsPolicy
+import ng1ok.yggdrasilmanager.data.model.MapsMutationResult
 import ng1ok.yggdrasilmanager.data.model.MapsRule
+import ng1ok.yggdrasilmanager.data.model.MapsRuleDraft
 import ng1ok.yggdrasilmanager.data.model.MapsScope
+import ng1ok.yggdrasilmanager.data.model.MapsScopeTarget
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
 import ng1ok.yggdrasilmanager.data.model.SyscallBacktrace
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerState
@@ -53,7 +55,7 @@ class YggdrasilRepository(
 
     @Volatile
     private var mapsOperations: MapsOperations = localMapsOperations
-    private val mapsMutex = Mutex()
+    private val mapsPolicy = MapsPolicyModule(operationsProvider = { mapsOperations })
 
     /*
      * Native callbacks must return quickly so the next kernel event can be read.
@@ -373,99 +375,60 @@ class YggdrasilRepository(
         if (ret == 0) Result.success(Unit) else Result.failure(RuntimeException("prctl errno ${-ret}"))
     }
 
+    /** Adds a validated rule while preserving the repository's unit-result API. */
     suspend fun addMapsRule(pid: Int?, rule: MapsRule): Result<Unit> =
-        withContext(Dispatchers.IO) {
-            mapsMutex.withLock {
-                runMapsMutation {
-                    validateMapsPid(pid)
-                    mapsOperations.addRule(pid, validateMapsRule(rule))
-                }
-            }
-        }
+        withMapsTarget(pid) { mapsPolicy.add(it, rule) }.map { }
 
+    /** Removes a validated rule while preserving the repository's unit-result API. */
     suspend fun removeMapsRule(pid: Int?, rule: MapsRule): Result<Unit> =
-        withContext(Dispatchers.IO) {
-            mapsMutex.withLock {
-                runMapsMutation {
-                    validateMapsPid(pid)
-                    mapsOperations.removeRule(pid, validateMapsRule(rule))
-                }
-            }
-        }
+        removeMapsRuleAndRead(pid, rule).map { }
 
+    /** Clears one scope, or every scope when [allScopes] is true. */
     suspend fun clearMaps(pid: Int?, allScopes: Boolean = false): Result<Unit> =
-        withContext(Dispatchers.IO) {
-            mapsMutex.withLock {
-                runMapsMutation {
-                    require(!(allScopes && pid != null)) {
-                        "清除所有範圍時不能指定 PID"
-                    }
-                    validateMapsPid(pid)
-                    mapsOperations.clear(pid, allScopes)
-                }
-            }
-        }
+        clearMapsAndRead(pid, allScopes).map { }
 
-    suspend fun getMaps(pid: Int?): Result<MapsScope> = withContext(Dispatchers.IO) {
-        mapsMutex.withLock {
-            try {
-                validateMapsPid(pid)
-                mapsOperations.get(pid)?.let(Result.Companion::success)
-                    ?: Result.failure(IllegalStateException("Maps 規則查詢失敗"))
-            } catch (failure: Exception) {
-                Result.failure(failure)
-            }
-        }
-    }
+    /** Adds [draft], returning a separate readback result when the mutation succeeds. */
+    internal suspend fun addMapsRuleAndRead(
+        pid: Int?,
+        draft: MapsRuleDraft,
+    ): Result<MapsMutationResult> = withMapsTarget(pid) { mapsPolicy.add(it, draft) }
 
-    private suspend fun runMapsMutation(block: suspend () -> Int): Result<Unit> = try {
-        val ret = block()
-        if (ret == 0) Result.success(Unit)
-        else Result.failure(RuntimeException("prctl errno ${-ret}"))
-    } catch (failure: Exception) {
-        Result.failure(failure)
-    }
+    /** Removes [rule], returning a separate readback result when the mutation succeeds. */
+    internal suspend fun removeMapsRuleAndRead(
+        pid: Int?,
+        rule: MapsRule,
+    ): Result<MapsMutationResult> = withMapsTarget(pid) { mapsPolicy.remove(it, rule) }
 
-    private fun validateMapsRule(rule: MapsRule): MapsRule {
-        require(rule.action == MapsPolicy.ACTION_HIDE || rule.action == MapsPolicy.ACTION_REWRITE_PERMS) {
-            "不支援的 Maps 動作"
+    /** Clears the selected scopes, returning a separate readback result on success. */
+    internal suspend fun clearMapsAndRead(
+        pid: Int?,
+        allScopes: Boolean = false,
+    ): Result<MapsMutationResult> {
+        if (allScopes && pid != null) {
+            return Result.failure(IllegalArgumentException("清除所有範圍時不能指定 PID"))
         }
-        require(rule.matchKind in MapsPolicy.MATCH_ANY..MapsPolicy.MATCH_ADDR_RANGE) {
-            "不支援的 Maps 匹配類型"
-        }
-        require(rule.pattern.length <= MapsPolicy.MAX_PATTERN_LENGTH && '\u0000' !in rule.pattern) {
-            "路徑樣式過長或包含 NUL 字元"
-        }
-        if (rule.matchKind == MapsPolicy.MATCH_ANY || rule.matchKind == MapsPolicy.MATCH_ADDR_RANGE) {
-            require(rule.matchKind == MapsPolicy.MATCH_ADDR_RANGE || rule.pattern.isEmpty()) {
-                "此匹配類型不使用路徑樣式"
-            }
+        return if (allScopes) {
+            mapsPolicy.clearAllScopes()
         } else {
-            require(rule.pattern.isNotEmpty()) { "路徑匹配需要填寫路徑樣式" }
-        }
-        if (rule.matchKind == MapsPolicy.MATCH_ADDR_RANGE) {
-            require(rule.addrStart >= 0 && rule.addrEnd > rule.addrStart) {
-                "位址範圍不能為空"
-            }
-        }
-        rule.matchPerms?.let(::validateMapsPermissions)
-        if (rule.action == MapsPolicy.ACTION_REWRITE_PERMS) {
-            requireNotNull(rule.setPerms) { "改寫權限時必須填寫設定權限" }
-            validateMapsPermissions(rule.setPerms)
-        } else {
-            require(rule.setPerms == null) { "隱藏動作不能設定權限" }
-        }
-        return rule
-    }
-
-    private fun validateMapsPermissions(value: String) {
-        require(value.length == 3 && value.all { it == 'r' || it == 'w' || it == 'x' || it == '-' }) {
-            "權限必須是三個 rwx 或 - 字元"
+            withMapsTarget(pid) { mapsPolicy.clear(it) }
         }
     }
 
-    private fun validateMapsPid(pid: Int?) {
-        require(pid == null || pid > 0) { "Maps PID 必須是正整數" }
+    /** Reads the current policy scope from the active process adapter. */
+    suspend fun getMaps(pid: Int?): Result<MapsScope> =
+        withMapsTarget(pid) { mapsPolicy.read(it) }
+
+    private suspend fun <T> withMapsTarget(
+        pid: Int?,
+        operation: suspend (MapsScopeTarget) -> Result<T>,
+    ): Result<T> {
+        // Target construction validates the PID before the module's Result boundary.
+        val target = try {
+            pid?.let(MapsScopeTarget::Process) ?: MapsScopeTarget.Global
+        } catch (failure: IllegalArgumentException) {
+            return Result.failure(failure)
+        }
+        return operation(target)
     }
 
     fun startEventStream() {

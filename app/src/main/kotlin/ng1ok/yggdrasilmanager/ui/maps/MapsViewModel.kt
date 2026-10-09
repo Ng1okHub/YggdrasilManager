@@ -11,8 +11,10 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
+import ng1ok.yggdrasilmanager.data.model.MapsMutationResult
 import ng1ok.yggdrasilmanager.data.model.MapsPolicy
 import ng1ok.yggdrasilmanager.data.model.MapsRule
+import ng1ok.yggdrasilmanager.data.model.MapsRuleDraft
 
 /** Immutable state for the maps policy editor. */
 data class MapsUiState(
@@ -93,17 +95,12 @@ class MapsViewModel(
 
     fun addRule() {
         val state = _uiState.value
-        val rule = try {
-            buildRule(state)
-        } catch (failure: Exception) {
-            _uiState.update { it.copy(error = failure.message ?: INVALID_RULE) }
-            return
-        }
+        val draft = buildDraft(state)
         val targetPid = try { selectedPid(state) } catch (failure: IllegalArgumentException) {
             _uiState.update { it.copy(error = failure.message ?: INVALID_PID) }
             return
         }
-        mutate(targetPid) { repo.addMapsRule(targetPid, rule) }
+        mutate { repo.addMapsRuleAndRead(targetPid, draft) }
     }
 
     fun removeRule(rule: MapsRule) {
@@ -112,7 +109,7 @@ class MapsViewModel(
             _uiState.update { it.copy(error = failure.message ?: INVALID_PID) }
             return
         }
-        mutate(targetPid) { repo.removeMapsRule(targetPid, rule) }
+        mutate { repo.removeMapsRuleAndRead(targetPid, rule) }
     }
 
     fun clearCurrentScope() {
@@ -121,20 +118,31 @@ class MapsViewModel(
             _uiState.update { it.copy(error = failure.message ?: INVALID_PID) }
             return
         }
-        mutate(targetPid) { repo.clearMaps(targetPid) }
+        mutate { repo.clearMapsAndRead(targetPid) }
     }
 
     fun clearAllScopes() {
-        mutate(null) { repo.clearMaps(pid = null, allScopes = true) }
+        mutate { repo.clearMapsAndRead(pid = null, allScopes = true) }
     }
 
-    private fun mutate(targetPid: Int?, operation: suspend () -> Result<Unit>) {
+    private fun mutate(operation: suspend () -> Result<MapsMutationResult>) {
         if (_uiState.value.busy) return
         _uiState.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
             try {
                 operation().fold(
-                    onSuccess = { refreshAfterMutation(targetPid) },
+                    onSuccess = { mutation ->
+                        mutation.readback.fold(
+                            onSuccess = { scope ->
+                                _uiState.update {
+                                    it.copy(rules = scope.rules, totalRules = scope.totalRules)
+                                }
+                            },
+                            onFailure = {
+                                _uiState.update { it.copy(error = READBACK_ERROR) }
+                            },
+                        )
+                    },
                     onFailure = { failure ->
                         _uiState.update { it.copy(error = failure.message ?: OPERATION_ERROR) }
                     },
@@ -145,36 +153,15 @@ class MapsViewModel(
         }
     }
 
-    private suspend fun refreshAfterMutation(targetPid: Int?) {
-        repo.getMaps(targetPid).onSuccess { scope ->
-            _uiState.update { it.copy(rules = scope.rules, totalRules = scope.totalRules) }
-        }
-    }
-
-    private fun buildRule(state: MapsUiState): MapsRule {
-        val rangeStart = parseAddress(state.startText)
-        val rangeEnd = parseAddress(state.endText)
-        return MapsRule(
-            action = state.action,
-            matchKind = state.matchKind,
-            matchPerms = state.matchPerms.trim().ifEmpty { null },
-            setPerms = if (state.action == MapsPolicy.ACTION_REWRITE_PERMS) {
-                state.setPerms.trim().ifEmpty { null }
-            } else {
-                null
-            },
-            addrStart = rangeStart,
-            addrEnd = rangeEnd,
-            pattern = state.pattern,
-        )
-    }
-
-    private fun parseAddress(text: String): Long {
-        if (text.isBlank()) return 0L
-        val normalized = text.trim().removePrefix("0x").removePrefix("0X")
-        return normalized.toULongOrNull(16)?.toLong()
-            ?: throw IllegalArgumentException("位址必須是十六進位")
-    }
+    private fun buildDraft(state: MapsUiState): MapsRuleDraft = MapsRuleDraft(
+        action = state.action,
+        matchKind = state.matchKind,
+        matchPerms = state.matchPerms,
+        setPerms = if (state.action == MapsPolicy.ACTION_REWRITE_PERMS) state.setPerms else "",
+        startAddress = state.startText,
+        endAddress = state.endText,
+        pattern = state.pattern,
+    )
 
     private fun selectedPid(state: MapsUiState): Int? {
         if (state.globalScope) return null
@@ -186,6 +173,7 @@ class MapsViewModel(
         const val QUERY_ERROR = "無法查詢 Maps 規則"
         const val INVALID_RULE = "Maps 規則格式無效"
         const val OPERATION_ERROR = "Maps 操作失敗"
+        const val READBACK_ERROR = "Maps 修改已生效，但重新讀取失敗；目前列表可能已過時，請重新整理，勿重複操作"
         const val INVALID_PID = "目標 PID 必須是正整數"
 
         val Factory: ViewModelProvider.Factory = viewModelFactory {
