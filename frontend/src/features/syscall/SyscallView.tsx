@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useReducer, useRef, useState } from "preact/hooks";
 import type { JSX } from "preact";
 import { Button, BrandHeader, ConnectionPill, CopyButton, EmptyState, Field, SectionHeading } from "../../shared/ui";
-import { WebSocketClient, tokenFromLocation } from "../../shared/transport";
+import { WebSocketClient } from "../../shared/transport";
 import {
   clearSyscallEvents,
   createRestartListenerCommand,
@@ -59,11 +59,9 @@ export function SyscallView() {
   const [apps, setApps] = useState<InstalledApp[]>([]);
   const [status, setStatus] = useState("");
   const clientRef = useRef<WebSocketClient | null>(null);
-  const token = tokenFromLocation();
 
   useEffect(() => {
     const client = new WebSocketClient("/ws", {
-      token,
       onStatus: (connection) => { dispatch({ kind: "connection", status: connection }); setStatus(connection === "open" ? "已連線" : connection === "closed" ? "連線中斷，將自動重試" : ""); },
       onMessage: (message) => dispatch({ kind: "message", message }),
       onError: (error) => dispatch({ kind: "error", message: error.message }),
@@ -71,15 +69,15 @@ export function SyscallView() {
     clientRef.current = client;
     client.connect();
     return () => { client.dispose(); clientRef.current = null; };
-  }, [token]);
+  }, []);
 
   useEffect(() => {
-    if (scope !== "uid" || !token) return;
-    fetch(`/api/apps?token=${encodeURIComponent(token)}`)
+    if (scope !== "uid") return;
+    fetch("/api/apps")
       .then((response) => { if (!response.ok) throw new Error(`App 清單讀取失敗 (${response.status})`); return response.json(); })
       .then((payload) => setApps(normalizeInstalledApps(payload)))
       .catch((error: unknown) => dispatch({ kind: "error", message: error instanceof Error ? error.message : "App 清單讀取失敗" }));
-  }, [scope, token]);
+  }, [scope]);
 
   const send = (command: Record<string, unknown>, success = "指令已送出") => {
     if (!clientRef.current?.send(command)) setStatus("WebSocket 尚未連線");

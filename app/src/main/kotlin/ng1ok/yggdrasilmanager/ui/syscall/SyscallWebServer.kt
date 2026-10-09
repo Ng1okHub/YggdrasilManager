@@ -30,7 +30,6 @@ import java.net.Inet4Address
 import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
-import java.security.SecureRandom
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicReference
@@ -187,7 +186,6 @@ internal fun Application.installSyscallWebRoutes(
     bindings: SyscallServerBindings,
     assetLoader: suspend (String) -> ByteArray?,
     hub: SyscallClientHub,
-    accessToken: String,
 ) {
     install(WebSockets)
     environment.monitor.subscribe(ApplicationStopped) { hub.clear() }
@@ -211,17 +209,9 @@ internal fun Application.installSyscallWebRoutes(
     }
     routing {
         get("/") {
-            if (!call.hasSyscallAccess(accessToken)) {
-                call.respond(HttpStatusCode.Forbidden)
-                return@get
-            }
             call.respondSyscallAsset("index.html", assetLoader)
         }
         get("/api/apps") {
-            if (!call.hasSyscallAccess(accessToken)) {
-                call.respond(HttpStatusCode.Forbidden)
-                return@get
-            }
             bindings.installedApps().fold(
                 onSuccess = { apps ->
                     call.respondSyscallJson(encodeInstalledApps(apps))
@@ -243,10 +233,6 @@ internal fun Application.installSyscallWebRoutes(
             }
         }
         webSocket("/ws") {
-            if (!call.hasSyscallAccess(accessToken)) {
-                close(CloseReason(CloseReason.Codes.VIOLATED_POLICY, "存取權杖無效"))
-                return@webSocket
-            }
             hub.add(
                 this,
                 encodeSyscallState(
@@ -290,9 +276,6 @@ internal fun Application.installSyscallWebRoutes(
         }
     }
 }
-
-private fun ApplicationCall.hasSyscallAccess(accessToken: String): Boolean =
-    request.queryParameters["token"] == accessToken
 
 private fun isUnsafePathSegment(segment: String): Boolean =
     segment.isBlank() || segment == "." || segment == ".." || '\\' in segment
@@ -346,7 +329,6 @@ internal class SyscallWebServer(
     },
     private val portAvailable: () -> Boolean = { isTcpPortAvailable(port) },
     private val sleeper: (Long) -> Unit = Thread::sleep,
-    private val tokenGenerator: () -> String = ::newAccessToken,
 ) : SyscallServer {
     private val hub = SyscallClientHub()
     private val _running = MutableStateFlow(false)
@@ -369,11 +351,6 @@ internal class SyscallWebServer(
             return@withLock portReady
         }
 
-        val token = tokenGenerator()
-        if (token.isBlank()) {
-            markStopped()
-            return@withLock Result.failure(IllegalStateException("無法建立存取權杖"))
-        }
         val engineFailure = AtomicReference<Throwable?>(null)
         val nextScope = CoroutineScope(
             SupervisorJob() + CoroutineExceptionHandler { _, error ->
@@ -383,7 +360,7 @@ internal class SyscallWebServer(
         var nextEngine: ApplicationEngine? = null
         val result = runCatching {
             val created = engineFactory(nextScope) {
-                installSyscallWebRoutes(bindings, ::loadAsset, hub, token)
+                installSyscallWebRoutes(bindings, ::loadAsset, hub)
             }
             nextEngine = created
             created.start(wait = false)
@@ -392,8 +369,8 @@ internal class SyscallWebServer(
             engine = created
             engineScope = nextScope
             val address = addressProvider()
-            _httpUrl.value = address?.let { "http://$it:$port?token=$token" }
-            _webSocketUrl.value = address?.let { "ws://$it:$port/ws?token=$token" }
+            _httpUrl.value = address?.let { "http://$it:$port" }
+            _webSocketUrl.value = address?.let { "ws://$it:$port/ws" }
             _running.value = true
         }
         if (result.isFailure) {
@@ -474,18 +451,3 @@ private fun siteLocalIpv4Address(): String? = runCatching {
         }
         ?.hostAddress
 }.getOrNull()
-
-private val accessTokenRandom = SecureRandom()
-private const val TOKEN_ALPHABET = "0123456789abcdef"
-
-private fun newAccessToken(): String {
-    val bytes = ByteArray(16)
-    accessTokenRandom.nextBytes(bytes)
-    return buildString(bytes.size * 2) {
-        bytes.forEach { byte ->
-            val value = byte.toInt() and 0xff
-            append(TOKEN_ALPHABET[value ushr 4])
-            append(TOKEN_ALPHABET[value and 0x0f])
-        }
-    }
-}

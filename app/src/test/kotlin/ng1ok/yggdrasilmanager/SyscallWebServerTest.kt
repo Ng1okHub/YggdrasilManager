@@ -46,10 +46,9 @@ import org.junit.Test
 
 class SyscallWebServerTest {
     private val json = Json
-    private val accessToken = "test-access-token"
 
     @Test
-    fun rootRequiresTokenAndValidTokenServesTheWebAssets() = testApplication {
+    fun rootServesTheWebAssetsWithoutAuthentication() = testApplication {
         val assets = mapOf(
             "index.html" to "<main>Arm64 Syscall Observe</main>".encodeToByteArray(),
             "app.js" to "export {};".encodeToByteArray(),
@@ -59,15 +58,12 @@ class SyscallWebServerTest {
                 bindings = emptyBindings(),
                 assetLoader = assets::get,
                 hub = SyscallClientHub(),
-                accessToken = accessToken,
             )
         }
 
-        val denied = client.get("/")
-        val root = client.get("/?token=$accessToken")
-        val script = client.get("/static/app.js?token=$accessToken")
+        val root = client.get("/")
+        val script = client.get("/static/app.js")
 
-        assertEquals(HttpStatusCode.Forbidden, denied.status)
         assertEquals(HttpStatusCode.OK, root.status)
         assertEquals("<main>Arm64 Syscall Observe</main>", root.bodyAsText())
         assertEquals("text/html; charset=UTF-8", root.headers["Content-Type"])
@@ -77,7 +73,7 @@ class SyscallWebServerTest {
     }
 
     @Test
-    fun installedAppsEndpointRequiresTokenAndPreservesSharedUidPackages() = testApplication {
+    fun installedAppsEndpointPreservesSharedUidPackages() = testApplication {
         var loadCount = 0
         val apps = listOf(
             InstalledApp("com.example.alpha", "Alpha", 10_123, isSystem = false),
@@ -93,14 +89,11 @@ class SyscallWebServerTest {
                 ),
                 assetLoader = { null },
                 hub = SyscallClientHub(),
-                accessToken = accessToken,
             )
         }
 
-        val denied = client.get("/api/apps")
-        val response = client.get("/api/apps?token=$accessToken")
+        val response = client.get("/api/apps")
 
-        assertEquals(HttpStatusCode.Forbidden, denied.status)
         assertEquals(1, loadCount)
         assertEquals(HttpStatusCode.OK, response.status)
         assertEquals("application/json; charset=UTF-8", response.headers["Content-Type"])
@@ -131,11 +124,10 @@ class SyscallWebServerTest {
                 ),
                 assetLoader = { null },
                 hub = SyscallClientHub(),
-                accessToken = accessToken,
             )
         }
 
-        val response = client.get("/api/apps?token=$accessToken")
+        val response = client.get("/api/apps")
 
         assertEquals(HttpStatusCode.InternalServerError, response.status)
         assertEquals("application/json; charset=UTF-8", response.headers["Content-Type"])
@@ -148,7 +140,7 @@ class SyscallWebServerTest {
     }
 
     @Test
-    fun validTokenWebSocketReceivesTheInitialRuleState() = testApplication {
+    fun webSocketReceivesTheInitialRuleState() = testApplication {
         val rule = SyscallObserveRule(
             63,
             SyscallScope.UID,
@@ -163,11 +155,10 @@ class SyscallWebServerTest {
                 ),
                 assetLoader = { null },
                 hub = SyscallClientHub(),
-                accessToken = accessToken,
             )
         }
         val socketClient = createClient { install(ClientWebSockets) }
-        val session = socketClient.webSocketSession("/ws?token=$accessToken")
+        val session = socketClient.webSocketSession("/ws")
         val state = receiveJson(session.incoming.receive())
 
         assertEquals("state", state.getValue("type").jsonPrimitive.content)
@@ -203,11 +194,10 @@ class SyscallWebServerTest {
                 ),
                 assetLoader = { null },
                 hub = SyscallClientHub(),
-                accessToken = accessToken,
             )
         }
         val socketClient = createClient { install(ClientWebSockets) }
-        val session = socketClient.webSocketSession("/ws?token=$accessToken")
+        val session = socketClient.webSocketSession("/ws")
         receiveJson(session.incoming.receive())
 
         session.send(
@@ -239,11 +229,10 @@ class SyscallWebServerTest {
                 ),
                 assetLoader = { null },
                 hub = SyscallClientHub(),
-                accessToken = accessToken,
             )
         }
         val socketClient = createClient { install(ClientWebSockets) }
-        val session = socketClient.webSocketSession("/ws?token=$accessToken")
+        val session = socketClient.webSocketSession("/ws")
         receiveJson(session.incoming.receive())
 
         session.send(
@@ -266,11 +255,10 @@ class SyscallWebServerTest {
                 bindings = emptyBindings(restartListener = { restartCount += 1 }),
                 assetLoader = { null },
                 hub = SyscallClientHub(),
-                accessToken = accessToken,
             )
         }
         val socketClient = createClient { install(ClientWebSockets) }
-        val session = socketClient.webSocketSession("/ws?token=$accessToken")
+        val session = socketClient.webSocketSession("/ws")
         receiveJson(session.incoming.receive())
 
         session.send(Frame.Text("""{"type":"restartListener"}"""))
@@ -282,7 +270,7 @@ class SyscallWebServerTest {
     }
 
     @Test
-    fun lifecyclePublishesUrlsWithTheGeneratedToken() {
+    fun lifecyclePublishesUrlsWithoutAuthenticationParameters() {
         val engine = mockk<ApplicationEngine>(relaxed = true)
         every { engine.start(wait = false) } returns engine
         val server = SyscallWebServer(
@@ -291,13 +279,12 @@ class SyscallWebServerTest {
             addressProvider = { "192.168.1.9" },
             engineFactory = { _, _ -> engine },
             portAvailable = { true },
-            tokenGenerator = { "fixed-token" },
         )
 
         assertTrue(server.start().isSuccess)
         assertTrue(server.running.value)
-        assertEquals("http://192.168.1.9:8766?token=fixed-token", server.httpUrl.value)
-        assertEquals("ws://192.168.1.9:8766/ws?token=fixed-token", server.webSocketUrl.value)
+        assertEquals("http://192.168.1.9:8766", server.httpUrl.value)
+        assertEquals("ws://192.168.1.9:8766/ws", server.webSocketUrl.value)
         verify(exactly = 1) { engine.start(wait = false) }
 
         server.stop()

@@ -1,7 +1,6 @@
 export type ConnectionStatus = "connecting" | "open" | "closed" | "error";
 
 export interface WebSocketClientOptions {
-  token?: string | null;
   reconnectDelayMs?: number;
   onStatus?: (status: ConnectionStatus) => void;
   onMessage?: (message: Record<string, unknown>) => void;
@@ -50,11 +49,8 @@ export class WebSocketClient {
     }
 
     this.options.onStatus?.("connecting");
-    const params = new URLSearchParams();
-    if (this.options.token) params.set("token", this.options.token);
-    const query = params.toString();
     const scheme = window.location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${scheme}//${window.location.host}${this.path}${query ? `?${query}` : ""}`;
+    const url = `${scheme}//${window.location.host}${this.path}`;
     const socket = new WebSocket(url);
     this.socket = socket;
 
@@ -84,8 +80,4 @@ export class WebSocketClient {
       this.open();
     }, this.delay);
   }
-}
-
-export function tokenFromLocation(): string | null {
-  return new URLSearchParams(window.location.search).get("token");
 }
