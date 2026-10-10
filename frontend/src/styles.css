@@ -409,6 +409,10 @@ select {
   z-index: 10;
 }
 
+.package-combobox--open {
+  z-index: 20;
+}
+
 .package-combobox-control {
   position: relative;
 }
@@ -433,22 +437,22 @@ select {
   transform: rotate(225deg);
 }
 
-#package-search {
+.package-search {
   padding-right: 38px;
   font-family: var(--mono);
   font-size: 13px;
 }
 
-#package-search::-webkit-search-cancel-button {
+.package-search::-webkit-search-cancel-button {
   margin-right: 16px;
 }
 
-.package-combobox--open #package-search {
+.package-combobox--open .package-search {
   border-color: var(--accent);
   box-shadow: 0 0 0 3px var(--accent-soft);
 }
 
-.package-combobox--invalid #package-search {
+.package-combobox--invalid .package-search {
   border-color: var(--danger);
   box-shadow: 0 0 0 3px var(--danger-soft);
 }
@@ -542,6 +546,10 @@ select {
   font-weight: 650;
   line-height: 1.35;
   overflow-wrap: anywhere;
+}
+
+.package-option > .package-option-name {
+  align-self: center;
 }
 
 .package-kind {
@@ -1365,10 +1373,6 @@ select {
   color: var(--danger);
   background: var(--danger-soft);
   font-size: 12px;
-}
-
-.syscall-rule-form--uid > label.field:nth-of-type(3) {
-  display: none;
 }
 
 textarea {

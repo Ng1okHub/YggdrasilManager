@@ -232,6 +232,12 @@ object YggdrasilNative : YggdrasilNativeApi {
         nativeHwbpResolveLibraryTarget(pid, mapsText, library, offset)
     }
 
+    /** Return names of loaded shared objects, including SONAMEs for ELF files mapped from APKs. */
+    fun hwbpListLibraries(pid: Int, mapsText: String): Result<List<String>> = runCatching {
+        nativeHwbpListLibraries(pid, mapsText)?.toList()
+            ?: throw IllegalStateException("Failed to enumerate loaded libraries")
+    }
+
     private external fun nativeHwbpUnwindDwarf(
         pid: Int,
         flags: Int,
@@ -250,4 +256,6 @@ object YggdrasilNative : YggdrasilNativeApi {
         library: String,
         offset: Long,
     ): Long
+
+    private external fun nativeHwbpListLibraries(pid: Int, mapsText: String): Array<String>?
 }

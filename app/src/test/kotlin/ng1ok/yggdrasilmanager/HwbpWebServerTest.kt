@@ -26,6 +26,7 @@ import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
@@ -75,6 +76,107 @@ class HwbpWebServerTest {
         assertEquals("text/css; charset=UTF-8", stylesheet.headers["Content-Type"])
         assertEquals(HttpStatusCode.NotFound, client.get("/static/missing.js").status)
         assertEquals(HttpStatusCode.BadRequest, client.get("/static/%2e%2e").status)
+    }
+
+    @Test
+    fun appOptionsEndpointPreservesPackageNamesAndLabels() = testApplication {
+        application {
+            installHwbpWebRoutes(
+                bindings = emptyBindings(installedApps = {
+                    Result.success(listOf(
+                        InstalledApp("com.example.alpha", "Alpha", 1234, false),
+                        InstalledApp("com.example.shared", "Shared", 1234, true),
+                    ))
+                }),
+                assetLoader = { null },
+                hub = HwbpClientHub(),
+            )
+        }
+
+        val response = client.get("/api/apps")
+
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals("application/json; charset=UTF-8", response.headers["Content-Type"])
+        val apps = json.parseToJsonElement(response.bodyAsText()).jsonObject
+            .getValue("apps").jsonArray.map { it.jsonObject }
+        assertEquals(listOf("com.example.alpha", "com.example.shared"),
+            apps.map { it.getValue("packageName").jsonPrimitive.content })
+        assertEquals("Alpha", apps.first().getValue("label").jsonPrimitive.content)
+    }
+
+    @Test
+    fun libraryOptionsEndpointPassesPackageOrPidToTheLoader() = testApplication {
+        val targets = mutableListOf<Pair<String?, Int?>>()
+        application {
+            installHwbpWebRoutes(
+                bindings = emptyBindings(libraryNames = { packageName, pid ->
+                    targets += packageName to pid
+                    Result.success(listOf("libalpha.so", "libz.so"))
+                }),
+                assetLoader = { null },
+                hub = HwbpClientHub(),
+            )
+        }
+
+        val byPackage = client.get("/api/libraries?packageName=com.example.alpha")
+        val byPid = client.get("/api/libraries?pid=1234")
+
+        assertEquals(HttpStatusCode.OK, byPackage.status)
+        assertEquals(HttpStatusCode.OK, byPid.status)
+        assertEquals(listOf("com.example.alpha" to null, null to 1234), targets)
+        assertEquals(listOf("libalpha.so", "libz.so"),
+            json.parseToJsonElement(byPackage.bodyAsText()).jsonObject
+                .getValue("libraries").jsonArray.map { it.jsonPrimitive.content })
+    }
+
+    @Test
+    fun invalidLibraryTargetsAreRejectedBeforeResolvingAProcess() = testApplication {
+        var loads = 0
+        application {
+            installHwbpWebRoutes(
+                bindings = emptyBindings(libraryNames = { _, _ ->
+                    loads += 1
+                    Result.success(emptyList())
+                }),
+                assetLoader = { null },
+                hub = HwbpClientHub(),
+            )
+        }
+
+        listOf(
+            "/api/libraries", "/api/libraries?pid=0", "/api/libraries?pid=invalid",
+            "/api/libraries?pid=2147483648", "/api/libraries?packageName=invalid",
+            "/api/libraries?packageName=com.example.alpha&pid=1234",
+        ).forEach { path ->
+            val response = client.get(path)
+            assertEquals(path, HttpStatusCode.BadRequest, response.status)
+            assertTrue(json.parseToJsonElement(response.bodyAsText()).jsonObject.containsKey("error"))
+        }
+        assertEquals(0, loads)
+    }
+
+    @Test
+    fun optionLoadingFailuresReturnJsonErrors() = testApplication {
+        application {
+            installHwbpWebRoutes(
+                bindings = emptyBindings(
+                    installedApps = { Result.failure(IllegalStateException("package manager unavailable")) },
+                    libraryNames = { _, _ -> Result.failure(IllegalArgumentException("app is not running")) },
+                ),
+                assetLoader = { null },
+                hub = HwbpClientHub(),
+            )
+        }
+
+        mapOf(
+            "/api/apps" to "package manager unavailable",
+            "/api/libraries?packageName=com.example.alpha" to "app is not running",
+        ).forEach { (path, message) ->
+            val response = client.get(path)
+            assertEquals(HttpStatusCode.InternalServerError, response.status)
+            assertEquals(message, json.parseToJsonElement(response.bodyAsText()).jsonObject
+                .getValue("error").jsonPrimitive.content)
+        }
     }
 
     @Test
@@ -343,6 +445,8 @@ class HwbpWebServerTest {
         events: MutableSharedFlow<HwbpEvent>? = null,
         points: () -> List<HwbpObserveParams> = { emptyList() },
         savedConfigs: () -> List<HwbpSavedConfig> = { emptyList() },
+        installedApps: suspend () -> Result<List<InstalledApp>> = { Result.success(emptyList()) },
+        libraryNames: suspend (String?, Int?) -> Result<List<String>> = { _, _ -> Result.success(emptyList()) },
         observe: suspend (HwbpObserveParams) -> Result<Unit> = { Result.success(Unit) },
         unobserve: suspend (Int, Long) -> Result<Unit> = { _, _ -> Result.success(Unit) },
         saveConfig: suspend (ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft) -> Result<Unit> = {
@@ -354,6 +458,8 @@ class HwbpWebServerTest {
         events = events ?: emptyFlow(),
         points = points,
         savedConfigs = savedConfigs,
+        installedApps = installedApps,
+        libraryNames = libraryNames,
         observe = observe,
         unobserve = unobserve,
         saveConfig = saveConfig,

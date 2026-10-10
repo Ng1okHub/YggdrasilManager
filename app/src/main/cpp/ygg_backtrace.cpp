@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -267,4 +268,42 @@ bool ygg_resolve_library_target(uint32_t pid,
         *out_error = "failed to find loaded ELF with SONAME '" + requested + "'";
     }
     return false;
+}
+
+bool ygg_list_library_names(uint32_t pid,
+                            const char *maps_text,
+                            std::vector<std::string> *out_names,
+                            std::string *out_error) {
+    if (!out_names) return false;
+    out_names->clear();
+    if (out_error) out_error->clear();
+    if (!pid) {
+        if (out_error) *out_error = "pid must be positive";
+        return false;
+    }
+    auto maps = create_maps(pid, maps_text, out_error);
+    if (!maps) return false;
+
+    auto process_memory = unwindstack::Memory::CreateProcessMemory(static_cast<pid_t>(pid));
+    std::set<std::string> names;
+    for (const auto &map : *maps) {
+        if (!map || map->name().empty()) continue;
+        std::unique_ptr<unwindstack::Memory> elf_memory(map->CreateMemory(process_memory));
+        if (!elf_memory) continue;
+        unwindstack::Elf elf(elf_memory.release());
+        if (!elf.Init() || !elf.valid()) continue;
+
+        // Android can map a library directly from an APK. Its maps path is then the APK,
+        // so use the ELF SONAME just as library target resolution does.
+        std::string name = elf.GetSoname();
+        if (name.empty()) {
+            name = basename_of(normalized_map_name(static_cast<const std::string &>(map->name())));
+            const auto marker = name.rfind(".so");
+            if (marker == std::string::npos ||
+                (marker + 3 != name.size() && name[marker + 3] != '.')) continue;
+        }
+        names.insert(name);
+    }
+    out_names->assign(names.begin(), names.end());
+    return true;
 }

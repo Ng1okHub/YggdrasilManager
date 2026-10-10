@@ -145,6 +145,52 @@ export interface HwbpFormValues {
   note: string;
 }
 
+export interface HwbpAppOption {
+  packageName: string;
+  label: string;
+  uid?: number;
+  isSystem: boolean;
+}
+
+/** Parse the apps API response into unique package choices, sorted by package name. */
+export function normalizeHwbpAppOptions(value: unknown): HwbpAppOption[] {
+  const source = value && typeof value === "object" ? (value as Record<string, unknown>).apps : null;
+  if (!Array.isArray(source)) return [];
+  const apps = new Map<string, HwbpAppOption>();
+  for (const item of source) {
+    if (!item || typeof item !== "object") continue;
+    const raw = item as Record<string, unknown>;
+    if (typeof raw.packageName !== "string") continue;
+    const packageName = raw.packageName.trim();
+    if (!packageName || apps.has(packageName)) continue;
+    const label = typeof raw.label === "string" ? raw.label.trim() : "";
+    const uid = Number(raw.uid);
+    apps.set(packageName, {
+      packageName, label: label || packageName, isSystem: Boolean(raw.isSystem),
+      ...(Number.isInteger(uid) && uid > 0 ? { uid } : {}),
+    });
+  }
+  return [...apps.values()].sort((a, b) => a.packageName.localeCompare(b.packageName));
+}
+
+/** Parse the libraries API response into unique, sorted library names. */
+export function normalizeHwbpLibraryOptions(value: unknown): string[] {
+  const source = value && typeof value === "object" ? (value as Record<string, unknown>).libraries : null;
+  if (!Array.isArray(source)) return [];
+  return [...new Set(source.filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+/** Return the libraries API query for the current process, or null until it is valid. */
+export function buildHwbpLibraryQuery(values: Pick<HwbpFormValues, "processKind" | "packageName" | "pid">): string | null {
+  if (values.processKind === "package") {
+    const packageName = values.packageName.trim();
+    return packageName ? `packageName=${encodeURIComponent(packageName)}` : null;
+  }
+  const pid = Number(values.pid);
+  return Number.isInteger(pid) && pid > 0 && pid <= 2147483647 ? `pid=${pid}` : null;
+}
+
 export function buildHwbpObserveCommand(values: HwbpFormValues): Record<string, unknown> {
   const process = buildProcessTarget(values);
   const mode = values.mode;

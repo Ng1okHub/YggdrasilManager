@@ -41,7 +41,7 @@ export function SectionHeading({ title, count }: { title: string; count?: number
   return <div className="section-heading"><h2>{title}</h2>{count !== undefined && <span className="count">{count}</span>}</div>;
 }
 
-export function Button(props: JSX.HTMLAttributes<HTMLButtonElement> & { children: ComponentChildren; variant?: "primary" | "quiet" | "danger"; type?: "button" | "submit" | "reset" }) {
+export function Button(props: JSX.ButtonHTMLAttributes<HTMLButtonElement> & { children: ComponentChildren; variant?: "primary" | "quiet" | "danger" }) {
   const { variant = "quiet", className = "", children, ...rest } = props;
   return <button className={`button button--${variant} ${className}`} {...rest}>{children}</button>;
 }

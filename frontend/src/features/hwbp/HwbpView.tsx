@@ -1,22 +1,28 @@
-import { useEffect, useReducer, useRef, useState } from "preact/hooks";
+import { useEffect, useMemo, useReducer, useRef, useState } from "preact/hooks";
 import type { JSX } from "preact";
-import { Button, BrandHeader, ConnectionPill, CopyButton, EmptyState, Field, SectionHeading, formatHex } from "../../shared/ui";
+import { Button, BrandHeader, ConnectionPill, CopyButton, EmptyState, Field, SectionHeading } from "../../shared/ui";
 import { WebSocketClient } from "../../shared/transport";
+import { PackagePicker } from "../../shared/PackagePicker";
+import { SearchPicker } from "../../shared/SearchPicker";
 import {
   buildHwbpApplyConfigCommand,
   buildHwbpConfigCommand,
   buildHwbpDeleteConfigCommand,
+  buildHwbpLibraryQuery,
   buildHwbpObserveCommand,
   buildHwbpSaveConfigCommand,
   buildHwbpUnobserveCommand,
   clearHwbpEvents,
   formatHwbpBacktrace,
   initialHwbpState,
+  normalizeHwbpAppOptions,
+  normalizeHwbpLibraryOptions,
   reduceHwbp,
   setHwbpConnection,
   setHwbpError,
   visibleHwbpEvents,
   type BacktraceMode,
+  type HwbpAppOption,
   type HwbpEvent,
   type HwbpFormValues,
   type HwbpState,
@@ -50,21 +56,13 @@ const initialForm: HwbpFormValues = {
   note: "",
 };
 
+/** Render the HWBP control form and live event stream. */
 export function HwbpView() {
   const [state, dispatch] = useReducer(reducer, undefined, initialHwbpState);
   const [form, setForm] = useState(initialForm);
   const [deduplicate, setDeduplicate] = useState(false);
   const [status, setStatus] = useState("");
   const clientRef = useRef<WebSocketClient | null>(null);
-
-  useEffect(() => {
-    const lengthSelect = document.querySelector<HTMLSelectElement>(
-      ".rule-editor form .field-grid select",
-    );
-    if (!lengthSelect) return;
-    lengthSelect.disabled = form.mode === "X";
-    if (form.mode === "X") lengthSelect.value = "4";
-  }, [form.mode, form.len]);
 
   useEffect(() => {
     const client = new WebSocketClient("/ws", {
@@ -151,7 +149,80 @@ function HwbpEditor({ form, setForm, send, setStatus }: {
   send: (command: Record<string, unknown>, success?: string) => void;
   setStatus: (status: string) => void;
 }) {
-  const update = (patch: Partial<HwbpFormValues>) => setForm((current) => ({ ...current, ...patch }));
+  const [apps, setApps] = useState<HwbpAppOption[]>([]);
+  const [appsLoading, setAppsLoading] = useState(true);
+  const [appsError, setAppsError] = useState<string | null>(null);
+  const [appsRevision, setAppsRevision] = useState(0);
+  const [packageQuery, setPackageQuery] = useState("");
+  const [packageMenuOpen, setPackageMenuOpen] = useState(false);
+  const [libraries, setLibraries] = useState<{
+    query: string | null; items: string[]; loading: boolean; error: string | null;
+  }>({ query: null, items: [], loading: false, error: null });
+  const [librariesRevision, setLibrariesRevision] = useState(0);
+  const [librarySearchQuery, setLibrarySearchQuery] = useState<string | null>(null);
+  const [libraryMenuOpen, setLibraryMenuOpen] = useState(false);
+  const libraryQuery = buildHwbpLibraryQuery(form);
+
+  useEffect(() => {
+    if (form.processKind !== "package") return;
+    const controller = new AbortController();
+    setAppsLoading(true);
+    setAppsError(null);
+    fetchHwbpOptions("/api/apps", controller.signal)
+      .then((payload) => {
+        if (controller.signal.aborted) return;
+        const options = normalizeHwbpAppOptions(payload);
+        setApps(options);
+        setForm((current) => options.some((app) => app.packageName === current.packageName)
+          ? current : { ...current, packageName: "", lib: "" });
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted) setAppsError(error instanceof Error ? error.message : "App 清單讀取失敗");
+      })
+      .finally(() => { if (!controller.signal.aborted) setAppsLoading(false); });
+    return () => controller.abort();
+  }, [form.processKind, appsRevision]);
+
+  useEffect(() => {
+    setLibrarySearchQuery(null);
+    setLibraryMenuOpen(false);
+    if (form.targetKind !== "lib" || !libraryQuery) {
+      setLibraries({ query: libraryQuery, items: [], loading: false, error: null });
+      return;
+    }
+    const controller = new AbortController();
+    setLibraries({ query: libraryQuery, items: [], loading: true, error: null });
+    // PID is typed by hand, so let input settle before resolving a process through root.
+    const timer = window.setTimeout(() => {
+      fetchHwbpOptions(`/api/libraries?${libraryQuery}`, controller.signal)
+        .then((payload) => {
+          if (controller.signal.aborted) return;
+          const items = normalizeHwbpLibraryOptions(payload);
+          setLibraries({ query: libraryQuery, items, loading: false, error: null });
+          setForm((current) => items.includes(current.lib) ? current : { ...current, lib: "" });
+        })
+        .catch((error: unknown) => {
+          if (!controller.signal.aborted) setLibraries({
+            query: libraryQuery, items: [], loading: false,
+            error: error instanceof Error ? error.message : "Library 清單讀取失敗",
+          });
+        });
+    }, form.processKind === "pid" ? 250 : 0);
+    return () => { window.clearTimeout(timer); controller.abort(); };
+  }, [form.targetKind, form.processKind, libraryQuery, librariesRevision]);
+
+  const libraryItems = libraries.query === libraryQuery ? libraries.items : [];
+  const libraryOptions = useMemo(() => libraryItems.map((name) => ({ value: name, label: name })), [libraryItems]);
+  const librariesLoading = Boolean(libraryQuery) && (libraries.loading || libraries.query !== libraryQuery);
+  const processReady = form.processKind === "pid" || (!appsLoading && !appsError && apps.some((app) => app.packageName === form.packageName));
+  const targetReady = form.targetKind === "abs" || (!librariesLoading && libraryItems.includes(form.lib));
+  const update = (patch: Partial<HwbpFormValues>) => {
+    if (patch.processKind !== undefined || patch.packageName !== undefined || patch.pid !== undefined) {
+      setLibrarySearchQuery(null);
+      setLibraryMenuOpen(false);
+    }
+    setForm((current) => ({ ...current, ...patch }));
+  };
   const submit = (event: SubmitEvent) => {
     event.preventDefault();
     try {
@@ -173,28 +244,67 @@ function HwbpEditor({ form, setForm, send, setStatus }: {
         <fieldset>
           <legend>目標程序</legend>
           <div className="segmented-control segmented-control--two">
-            {(["package", "pid"] as const).map((kind) => <label key={kind}><input type="radio" checked={form.processKind === kind} onChange={() => update({ processKind: kind })} /><span>{kind === "package" ? "Package" : "PID"}</span></label>)}
+            {(["package", "pid"] as const).map((kind) => <label key={kind}><input type="radio" checked={form.processKind === kind} onChange={() => { update({ processKind: kind, lib: "" }); setPackageMenuOpen(false); }} /><span>{kind === "package" ? "Package" : "PID"}</span></label>)}
           </div>
         </fieldset>
-        {form.processKind === "package" ? <Field label="App package"><input value={form.packageName} onInput={(e) => update({ packageName: (e.currentTarget as HTMLInputElement).value })} placeholder="com.example.app" /></Field> : <Field label="Target PID"><input type="number" min="1" value={form.pid} onInput={(e) => update({ pid: (e.currentTarget as HTMLInputElement).value })} /></Field>}
+        {form.processKind === "package" ? <div className="field">
+          <PackagePicker
+            label="App package"
+            apps={apps}
+            selected={form.packageName}
+            query={packageQuery}
+            open={packageMenuOpen}
+            disabled={appsLoading || Boolean(appsError) || !apps.length}
+            placeholder={appsLoading ? "載入 App 清單中…" : appsError ? "App 清單讀取失敗" : apps.length ? "搜尋包名或 App 名稱" : "沒有可選擇的 App"}
+            onFocus={() => setPackageMenuOpen(true)}
+            onClose={() => setPackageMenuOpen(false)}
+            onQuery={(value) => { setPackageQuery(value); update({ packageName: "", lib: "" }); setPackageMenuOpen(true); }}
+            onSelect={(app) => { update({ packageName: app.packageName, lib: "" }); setPackageQuery(app.packageName); setPackageMenuOpen(false); }}
+          />
+          <div className="package-feedback"><p className={`package-status ${appsError ? "package-status--error" : ""}`} role="status">{appsError || (appsLoading ? "" : `${apps.length} 個 App`)}</p><Button type="button" className="package-reload" disabled={appsLoading} onClick={() => setAppsRevision((value) => value + 1)}>重新載入</Button></div>
+        </div> : <Field label="Target PID"><input type="number" min="1" value={form.pid} onInput={(e) => update({ pid: (e.currentTarget as HTMLInputElement).value, lib: "" })} /></Field>}
         <fieldset>
           <legend>位址來源</legend>
           <div className="segmented-control segmented-control--two">
             {(["abs", "lib"] as const).map((kind) => <label key={kind}><input type="radio" checked={form.targetKind === kind} onChange={() => update({ targetKind: kind })} /><span>{kind === "abs" ? "Absolute" : "Library + offset"}</span></label>)}
           </div>
         </fieldset>
-        {form.targetKind === "abs" ? <Field label="Address"><input value={form.addr} onInput={(e) => update({ addr: (e.currentTarget as HTMLInputElement).value })} placeholder="0x7ff0001000" /></Field> : <div className="field-grid"><Field label="Library"><input value={form.lib} onInput={(e) => update({ lib: (e.currentTarget as HTMLInputElement).value })} placeholder="libfoo.so" /></Field><Field label="Offset"><input value={form.offset} onInput={(e) => update({ offset: (e.currentTarget as HTMLInputElement).value })} placeholder="0x1234" /></Field></div>}
+        {form.targetKind === "abs" ? <Field label="Address"><input value={form.addr} onInput={(e) => update({ addr: (e.currentTarget as HTMLInputElement).value })} placeholder="0x7ff0001000" /></Field> : <div className="field-grid">
+          <div className="field"><SearchPicker
+            label="Libname"
+            options={libraryOptions}
+            selected={form.lib}
+            query={librarySearchQuery ?? form.lib}
+            open={libraryMenuOpen}
+            disabled={!libraryQuery || librariesLoading || !libraryItems.length}
+            placeholder={!libraryQuery ? "請先選擇 App 或輸入 PID" : librariesLoading ? "載入 Library 清單中…" : libraries.error ? "Library 清單讀取失敗" : libraryItems.length ? "搜尋 Library 名稱" : "沒有已載入的 Library"}
+            emptyMessage="找不到符合的 Library"
+            onFocus={() => setLibraryMenuOpen(true)}
+            onClose={() => setLibraryMenuOpen(false)}
+            onQuery={(value) => { setLibrarySearchQuery(value); update({ lib: "" }); setLibraryMenuOpen(true); }}
+            onSelect={(value) => { update({ lib: value }); setLibrarySearchQuery(null); setLibraryMenuOpen(false); }}
+          />
+          <div className="package-feedback"><p className={`package-status ${libraries.error ? "package-status--error" : ""}`} role="status">{libraries.error || (libraryQuery && !librariesLoading ? `${libraryItems.length} 個 Library` : "")}</p><Button type="button" className="package-reload" disabled={!libraryQuery || librariesLoading} onClick={() => setLibrariesRevision((value) => value + 1)}>重新載入</Button></div></div>
+          <Field label="Offset"><input value={form.offset} onInput={(e) => update({ offset: (e.currentTarget as HTMLInputElement).value })} placeholder="0x1234" /></Field>
+        </div>}
         <fieldset>
           <legend>模式</legend>
           <div className="segmented-control segmented-control--four">{(["R", "W", "RW", "X"] as const).map((mode) => <label key={mode}><input type="radio" checked={form.mode === mode} onChange={() => update({ mode, len: mode === "X" ? "4" : form.len })} /><span>{mode}</span></label>)}</div>
         </fieldset>
-        <div className="field-grid"><Field label="長度"><select value={form.len} onChange={(e) => update({ len: (e.currentTarget as HTMLSelectElement).value })}>{["1", "2", "4", "8"].map((len) => <option key={len}>{len}</option>)}</select></Field><Field label="Stack bytes"><input type="number" min="0" max="65536" value={form.stackSize} onInput={(e) => update({ stackSize: (e.currentTarget as HTMLInputElement).value })} /></Field></div>
+        <div className="field-grid"><Field label="長度"><select value={form.mode === "X" ? "4" : form.len} disabled={form.mode === "X"} onChange={(e) => update({ len: (e.currentTarget as HTMLSelectElement).value })}>{["1", "2", "4", "8"].map((len) => <option key={len}>{len}</option>)}</select></Field><Field label="Stack bytes"><input type="number" min="0" max="65536" value={form.stackSize} onInput={(e) => update({ stackSize: (e.currentTarget as HTMLInputElement).value })} /></Field></div>
         <Field label="Backtrace mode"><select value={form.backtraceMode} onChange={(e) => { const mode = (e.currentTarget as HTMLSelectElement).value as BacktraceMode; update({ backtraceMode: mode }); send(buildHwbpConfigCommand(mode), "Backtrace 模式已更新"); }}><option value="fp">Frame pointer (FP)</option><option value="dwarf">DWARF</option></select></Field>
         <Field label="設定備註"><textarea value={form.note} maxLength={2000} onInput={(e) => update({ note: (e.currentTarget as HTMLTextAreaElement).value })} placeholder="這個觀察點的用途" /></Field>
-        <div className="form-actions"><Button type="button" onClick={save}>儲存設定</Button><Button type="submit" variant="primary">開始觀察</Button></div>
+        <div className="form-actions"><Button type="button" disabled={form.processKind !== "package" || !processReady || !targetReady} onClick={save}>儲存設定</Button><Button type="submit" variant="primary" disabled={!processReady || !targetReady}>開始觀察</Button></div>
       </form>
     </section>
   );
+}
+
+async function fetchHwbpOptions(url: string, signal: AbortSignal): Promise<unknown> {
+  const response = await fetch(url, { signal });
+  const payload = await response.json();
+  if (!response.ok) throw new Error(typeof payload?.error === "string" ? payload.error : `清單讀取失敗 (${response.status})`);
+  return payload;
 }
 
 function HwbpEventCard({ event }: { event: HwbpEvent }) {

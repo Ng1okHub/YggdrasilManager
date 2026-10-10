@@ -1225,3 +1225,35 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_nativeHwbpResolveLibraryTarge
     }
     return static_cast<jlong>(address);
 }
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_nativeHwbpListLibraries(
+        JNIEnv *env, jobject, jint pid, jstring mapsText) {
+    if (pid <= 0 || !mapsText) {
+        jclass exception_cls = env->FindClass("java/lang/IllegalArgumentException");
+        if (exception_cls) env->ThrowNew(exception_cls, "positive pid and mapsText are required");
+        return nullptr;
+    }
+    const char *maps_cstr = env->GetStringUTFChars(mapsText, nullptr);
+    if (!maps_cstr) return nullptr;
+    std::vector<std::string> names;
+    std::string error;
+    const bool ok = ygg_list_library_names(static_cast<uint32_t>(pid), maps_cstr, &names, &error);
+    env->ReleaseStringUTFChars(mapsText, maps_cstr);
+    if (!ok) {
+        jclass exception_cls = env->FindClass("java/lang/IllegalArgumentException");
+        if (exception_cls) env->ThrowNew(exception_cls, error.c_str());
+        return nullptr;
+    }
+    jclass string_cls = env->FindClass("java/lang/String");
+    if (!string_cls) return nullptr;
+    jobjectArray out = env->NewObjectArray(static_cast<jsize>(names.size()), string_cls, nullptr);
+    if (!out) return nullptr;
+    for (size_t i = 0; i < names.size(); ++i) {
+        jstring name = env->NewStringUTF(names[i].c_str());
+        if (!name) return nullptr;
+        env->SetObjectArrayElement(out, static_cast<jsize>(i), name);
+        env->DeleteLocalRef(name);
+    }
+    return out;
+}

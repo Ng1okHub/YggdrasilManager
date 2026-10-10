@@ -26,6 +26,7 @@ import kotlinx.coroutines.withContext
 import kotlin.concurrent.withLock
 import ng1ok.yggdrasilmanager.App
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledAppsSource
 import ng1ok.yggdrasilmanager.data.hwbp.EmptyHwbpConfigStore
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigStore
@@ -36,6 +37,7 @@ import ng1ok.yggdrasilmanager.data.model.HwbpEventEnricher
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
 import ng1ok.yggdrasilmanager.data.model.FileProcMapsSource
 import ng1ok.yggdrasilmanager.data.model.ProcMapsSource
+import ng1ok.yggdrasilmanager.native.YggdrasilNative
 
 data class HwbpUiState(
     val serverRunning: Boolean = false,
@@ -53,9 +55,15 @@ class HwbpViewModel internal constructor(
     private val repo: YggdrasilRepository,
     serverFactory: HwbpServerFactory,
     private val configStore: HwbpConfigStore = EmptyHwbpConfigStore,
+    private val installedAppsSource: InstalledAppsSource = InstalledAppsSource {
+        Result.success(emptyList())
+    },
     private val packagePidResolver: HwbpPackagePidResolver = RootHwbpPackagePidResolver,
     private val mapsSource: ProcMapsSource = FileProcMapsSource,
     private val libraryTargetResolver: HwbpLibraryTargetResolver = nativeLibraryTargetResolver,
+    private val libraryNamesResolver: (Int, String) -> List<String> = { pid, mapsText ->
+        YggdrasilNative.hwbpListLibraries(pid, mapsText).getOrThrow()
+    },
 ) : ViewModel() {
     private val _observePoints = MutableStateFlow<List<HwbpObserveParams>>(emptyList())
     val observePoints: StateFlow<List<HwbpObserveParams>> = _observePoints.asStateFlow()
@@ -86,6 +94,8 @@ class HwbpViewModel internal constructor(
                 points = { _observePoints.value },
                 savedConfigs = { _savedConfigs.value },
                 backtraceMode = { _backtraceMode.value },
+                installedApps = { installedAppsSource.load() },
+                libraryNames = ::loadLibraryNames,
                 observe = ::observe,
                 unobserve = ::unobserve,
                 setBacktraceMode = ::setBacktraceMode,
@@ -260,6 +270,32 @@ class HwbpViewModel internal constructor(
             }
         }
 
+    private suspend fun loadLibraryNames(
+        packageName: String?,
+        pid: Int?,
+    ): Result<List<String>> = withContext(Dispatchers.IO) {
+        try {
+            val resolvedPid = when {
+                packageName != null && pid == null ->
+                    packagePidResolver.resolve(normalizePackageName(packageName))
+                packageName == null && pid != null && pid > 0 -> pid
+                else -> throw IllegalArgumentException("Specify either packageName or pid")
+            }
+            val mapsText = mapsSource.readMaps(resolvedPid)
+                ?: throw IllegalArgumentException(
+                    "Failed to read libraries for pid=$resolvedPid " +
+                        "(process missing, no root, or SELinux blocked /proc/$resolvedPid/maps)"
+                )
+            // Keep named mappings even when ELF metadata cannot be read under the app UID.
+            val names = libraryNamesResolver(resolvedPid, mapsText) + extractHwbpLibraryNames(mapsText)
+            Result.success(names.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER.thenBy { it }))
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (failure: Exception) {
+            Result.failure(failure)
+        }
+    }
+
     private suspend fun persistConfigs(configs: List<HwbpSavedConfig>): Result<Unit> {
         val result = try {
             configStore.save(configs)
@@ -315,6 +351,7 @@ class HwbpViewModel internal constructor(
                         HwbpWebServer(application, bindings)
                     },
                     configStore = application.hwbpConfigStore,
+                    installedAppsSource = application.installedAppsSource,
                 )
             }
         }

@@ -48,6 +48,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.concurrent.withLock
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
@@ -71,6 +72,12 @@ internal data class HwbpServerBindings(
     val points: () -> List<HwbpObserveParams>,
     val savedConfigs: () -> List<HwbpSavedConfig> = { emptyList() },
     val backtraceMode: () -> String = { "fp" },
+    val installedApps: suspend () -> Result<List<InstalledApp>> = {
+        Result.success(emptyList())
+    },
+    val libraryNames: suspend (String?, Int?) -> Result<List<String>> = { _, _ ->
+        Result.success(emptyList())
+    },
     val observe: suspend (HwbpObserveParams) -> Result<Unit>,
     val unobserve: suspend (Int, Long) -> Result<Unit>,
     val setBacktraceMode: (String) -> Result<Unit> = { Result.success(Unit) },
@@ -152,6 +159,42 @@ internal fun Application.installHwbpWebRoutes(
         get("/") {
             call.respondAsset("index.html", assetLoader)
         }
+        get("/api/apps") {
+            bindings.installedApps().fold(
+                onSuccess = { apps -> call.respondHwbpJson(encodeHwbpInstalledApps(apps)) },
+                onFailure = { error ->
+                    call.respondHwbpJson(
+                        encodeHwbpApiError(error),
+                        HttpStatusCode.InternalServerError,
+                    )
+                },
+            )
+        }
+        get("/api/libraries") {
+            val target = decodeLibraryTargetQuery(
+                packageName = call.request.queryParameters["packageName"],
+                pid = call.request.queryParameters["pid"],
+            )
+            if (target.isFailure) {
+                call.respondHwbpJson(
+                    encodeHwbpApiError(target.exceptionOrNull()!!),
+                    HttpStatusCode.BadRequest,
+                )
+                return@get
+            }
+            val (packageName, pid) = target.getOrThrow()
+            bindings.libraryNames(packageName, pid).fold(
+                onSuccess = { libraries ->
+                    call.respondHwbpJson(encodeHwbpLibraryNames(libraries))
+                },
+                onFailure = { error ->
+                    call.respondHwbpJson(
+                        encodeHwbpApiError(error),
+                        HttpStatusCode.InternalServerError,
+                    )
+                },
+            )
+        }
         get("/static/{path...}") {
             val segments = call.parameters.getAll("path").orEmpty()
             if (segments.isEmpty() || segments.any(::isUnsafePathSegment)) {
@@ -207,6 +250,25 @@ internal fun Application.installHwbpWebRoutes(
     }
 }
 
+private fun decodeLibraryTargetQuery(
+    packageName: String?,
+    pid: String?,
+): Result<Pair<String?, Int?>> = runCatching {
+    val normalizedPackageName = packageName?.trim()?.takeIf(String::isNotEmpty)
+    val normalizedPid = pid?.trim()?.takeIf(String::isNotEmpty)
+    require((normalizedPackageName == null) != (normalizedPid == null)) {
+        "Specify either packageName or pid"
+    }
+    if (normalizedPackageName != null) {
+        normalizePackageName(normalizedPackageName) to null
+    } else {
+        val parsedPid = normalizedPid?.toIntOrNull()
+            ?: throw IllegalArgumentException("pid must be a positive integer")
+        require(parsedPid > 0) { "pid must be a positive integer" }
+        null to parsedPid
+    }
+}
+
 private fun isUnsafePathSegment(segment: String): Boolean =
     segment.isBlank() || segment == "." || segment == ".." || '\\' in segment
 
@@ -220,6 +282,17 @@ private suspend fun ApplicationCall.respondAsset(
         return
     }
     respondBytes(bytes, contentTypeFor(path))
+}
+
+private suspend fun ApplicationCall.respondHwbpJson(
+    text: String,
+    status: HttpStatusCode = HttpStatusCode.OK,
+) {
+    respondBytes(
+        bytes = text.encodeToByteArray(),
+        contentType = ContentType.Application.Json.withCharset(Charsets.UTF_8),
+        status = status,
+    )
 }
 
 private fun contentTypeFor(path: String): ContentType = when {

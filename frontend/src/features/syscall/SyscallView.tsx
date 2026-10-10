@@ -2,6 +2,7 @@ import { useEffect, useMemo, useReducer, useRef, useState } from "preact/hooks";
 import type { JSX } from "preact";
 import { Button, BrandHeader, ConnectionPill, CopyButton, EmptyState, Field, SectionHeading } from "../../shared/ui";
 import { WebSocketClient } from "../../shared/transport";
+import { PackagePicker } from "../../shared/PackagePicker";
 import {
   clearSyscallEvents,
   createRestartListenerCommand,
@@ -95,11 +96,6 @@ export function SyscallView() {
   const observed = useMemo(() => observedSyscallsFromRules(state.rules), [state.rules]);
   const events = filterSyscallEvents(state);
   const catalog = state.supportedSyscalls.length ? state.supportedSyscalls : observed;
-  const matchingApps = useMemo(() => {
-    const query = packageQuery.trim().toLowerCase();
-    if (!query || packageQuery === packageName) return apps;
-    return apps.filter((app) => `${app.packageName} ${app.label} ${app.uid}`.toLowerCase().includes(query));
-  }, [apps, packageName, packageQuery]);
 
   return (
     <div className="app-root">
@@ -112,8 +108,7 @@ export function SyscallView() {
             <form className={`syscall-rule-form syscall-rule-form--${scope}`} onSubmit={submit as unknown as JSX.GenericEventHandler<HTMLFormElement>}>
               <Field label="Syscall"><select id="syscall-nr" required disabled={!catalog.length}>{catalog.map((entry) => <option key={entry.nr} value={entry.nr}>{entry.nr} · {entry.name}</option>)}</select></Field>
               <Field label="範圍"><select value={scope} onChange={(e) => setScope((e.currentTarget as HTMLSelectElement).value as Scope)}><option value="tgid">Process (TGID)</option><option value="tid">Thread (TID)</option><option value="uid">App (UID)</option></select></Field>
-              {scope === "uid" ? <Field label="目標 App"><select value={packageName} disabled={!apps.length} onChange={(e) => setPackageName((e.currentTarget as HTMLSelectElement).value)}><option value="">選擇 App</option>{apps.map((app) => <option key={app.packageName} value={app.packageName}>{app.label} · {app.packageName}</option>)}</select></Field> : <Field label={scope === "tid" ? "Thread ID" : "Process ID"}><input type="number" min="1" value={targetId} onInput={(e) => setTargetId((e.currentTarget as HTMLInputElement).value)} required /></Field>}
-              {scope === "uid" && <PackagePicker apps={matchingApps} selected={packageName} query={packageQuery} open={packageMenuOpen} disabled={!apps.length} onFocus={() => setPackageMenuOpen(true)} onClose={() => setPackageMenuOpen(false)} onQuery={(value) => { setPackageQuery(value); setPackageName(""); setPackageMenuOpen(true); }} onSelect={(app) => { setPackageName(app.packageName); setPackageQuery(app.packageName); setPackageMenuOpen(false); }} />}
+              {scope === "uid" ? <PackagePicker apps={apps} selected={packageName} query={packageQuery} open={packageMenuOpen} disabled={!apps.length} onFocus={() => setPackageMenuOpen(true)} onClose={() => setPackageMenuOpen(false)} onQuery={(value) => { setPackageQuery(value); setPackageName(""); setPackageMenuOpen(true); }} onSelect={(app) => { setPackageName(app.packageName); setPackageQuery(app.packageName); setPackageMenuOpen(false); }} /> : <Field label={scope === "tid" ? "Thread ID" : "Process ID"}><input type="number" min="1" value={targetId} onInput={(e) => setTargetId((e.currentTarget as HTMLInputElement).value)} required /></Field>}
               <fieldset className="phase-field"><legend>觀察階段</legend><div className="segmented-control">{(["enter", "exit", "both"] as const).map((item) => <label key={item}><input type="radio" checked={phase === item} onChange={() => setPhase(item)} /><span>{item}</span></label>)}</div></fieldset>
               <fieldset className="backtrace-field"><legend>Backtrace</legend><label className="backtrace-toggle"><input type="checkbox" checked={captureBacktrace} onChange={(e) => setCaptureBacktrace((e.currentTarget as HTMLInputElement).checked)} /><span>Capture user stack</span></label>{captureBacktrace && <Field label="Stack snapshot size"><input type="number" min="0" max="65536" step="8" value={backtraceStackSize} onInput={(e) => setBacktraceStackSize((e.currentTarget as HTMLInputElement).value)} /></Field>}<Field label="Unwind mode"><select value={backtraceMode} onChange={(e) => { const mode = normalizeBacktraceMode((e.currentTarget as HTMLSelectElement).value); setBacktraceMode(mode); send(createSyscallConfigCommand(mode), "Backtrace 模式已更新"); }}><option value="fp">Frame pointer (FP)</option><option value="dwarf">DWARF (libunwindstack)</option></select></Field></fieldset>
               <div className="form-actions"><Button type="submit" variant="primary">新增規則</Button></div>
@@ -133,81 +128,6 @@ export function SyscallView() {
 
 function RuleRow({ rule, onRemove }: { rule: SyscallRule; onRemove: () => void }) {
   return <article className="rule-row"><div className="rule-summary"><span className="rule-name">{rule.syscallNr} · {rule.name || `syscall_${rule.syscallNr}`}</span><span className="rule-target">{rule.scope}:{rule.targetId} · {rule.phase}{rule.backtrace ? " · bt" : ""}</span></div><Button variant="danger" onClick={onRemove}>移除</Button></article>;
-}
-
-function PackagePicker({
-  apps,
-  selected,
-  query,
-  open,
-  disabled,
-  onFocus,
-  onClose,
-  onQuery,
-  onSelect,
-}: {
-  apps: InstalledApp[];
-  selected: string;
-  query: string;
-  open: boolean;
-  disabled: boolean;
-  onFocus: () => void;
-  onClose: () => void;
-  onQuery: (value: string) => void;
-  onSelect: (app: InstalledApp) => void;
-}) {
-  return (
-    <div className="field package-target">
-      <span>目標 App</span>
-      <div className={`package-combobox ${open ? "package-combobox--open" : ""}`}>
-        <div className="package-combobox-control">
-          <input
-            id="package-search"
-            type="search"
-            role="combobox"
-            aria-autocomplete="list"
-            aria-haspopup="listbox"
-            aria-expanded={open}
-            aria-controls="package-options"
-            value={query}
-            disabled={disabled}
-            onFocus={onFocus}
-            onBlur={() => window.setTimeout(() => {
-              const active = document.activeElement;
-              if (!(active instanceof HTMLElement) || !active.closest(".package-combobox")) {
-                // Keep the selection field tidy when focus leaves the menu.
-                onClose();
-              }
-            }, 120)}
-            onInput={(event) => onQuery((event.currentTarget as HTMLInputElement).value)}
-            placeholder="搜尋包名或 App 名稱"
-            autoComplete="off"
-            spellcheck={false}
-          />
-        </div>
-        <div id="package-options" className="package-options" role="listbox" hidden={!open}>
-          {apps.length === 0 ? <div className="package-options-empty">找不到符合的 App</div> : apps.map((app) => (
-            <div
-              className="package-option"
-              role="option"
-              aria-selected={app.packageName === selected}
-              key={app.packageName}
-              onMouseDown={(event) => event.preventDefault()}
-              onClick={() => onSelect(app)}
-            >
-              <div className="package-option-primary">
-                <span className="package-option-name">{app.packageName}</span>
-                <span className={`package-kind ${app.isSystem ? "package-kind--system" : "package-kind--user"}`}>
-                  {app.isSystem ? "系統" : "使用者"}
-                </span>
-              </div>
-              <div className="package-option-meta"><span>{app.label}</span><span>UID {app.uid}</span></div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
 }
 
 function SyscallEventCard({ event }: { event: SyscallEvent }) {

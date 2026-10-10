@@ -6,15 +6,47 @@ import {
   buildHwbpApplyConfigCommand,
   buildHwbpConfigCommand,
   buildHwbpDeleteConfigCommand,
+  buildHwbpLibraryQuery,
   buildHwbpObserveCommand,
   buildHwbpSaveConfigCommand,
   buildHwbpUnobserveCommand,
   clearHwbpEvents,
   formatHwbpBacktrace,
   initialHwbpState,
+  normalizeHwbpAppOptions,
+  normalizeHwbpLibraryOptions,
   reduceHwbp,
   visibleHwbpEvents,
 } from "../src/features/hwbp/model.ts";
+
+test("HWBP app choices retain shared-UID packages and normalize labels", () => {
+  assert.deepEqual(normalizeHwbpAppOptions({ apps: [
+    { packageName: " com.example.zeta ", label: " Zeta ", uid: "1234", isSystem: true },
+    { packageName: "com.example.alpha", label: "", uid: 1234 },
+    { packageName: "com.example.alpha", label: "duplicate" },
+    { packageName: "" }, null, { packageName: 123 },
+  ] }), [
+    { packageName: "com.example.alpha", label: "com.example.alpha", uid: 1234, isSystem: false },
+    { packageName: "com.example.zeta", label: "Zeta", uid: 1234, isSystem: true },
+  ]);
+  assert.deepEqual(normalizeHwbpAppOptions(null), []);
+});
+
+test("HWBP library choices ignore invalid items and collapse duplicate map names", () => {
+  assert.deepEqual(normalizeHwbpLibraryOptions({ libraries: [
+    "libz.so", " liba.so ", "liba.so", "", null, {},
+  ] }), ["liba.so", "libz.so"]);
+  assert.deepEqual(normalizeHwbpLibraryOptions({ libraries: null }), []);
+});
+
+test("HWBP library queries follow the chosen target kind and reject incomplete PIDs", () => {
+  assert.equal(buildHwbpLibraryQuery({ processKind: "package", packageName: " com.example.target ", pid: "99" }), "packageName=com.example.target");
+  assert.equal(buildHwbpLibraryQuery({ processKind: "pid", packageName: "com.example.target", pid: "99" }), "pid=99");
+  assert.equal(buildHwbpLibraryQuery({ processKind: "package", packageName: "", pid: "99" }), null);
+  for (const pid of ["", "0", "-1", "12.5", "2147483648", "invalid"]) {
+    assert.equal(buildHwbpLibraryQuery({ processKind: "pid", packageName: "", pid }), null);
+  }
+});
 
 test("HWBP state replaces points, saved configs, and backtrace mode", () => {
   const state = reduceHwbp(initialHwbpState(), {

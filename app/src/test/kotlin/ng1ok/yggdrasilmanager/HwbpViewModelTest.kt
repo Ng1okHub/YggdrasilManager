@@ -17,11 +17,14 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledAppsSource
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigStore
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
+import ng1ok.yggdrasilmanager.data.model.ProcMapsSource
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpServer
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpServerBindings
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpServerFactory
@@ -43,6 +46,12 @@ class HwbpViewModelTest {
     private lateinit var bindings: HwbpServerBindings
     private lateinit var viewModel: HwbpViewModel
     private lateinit var configStore: FakeHwbpConfigStore
+    private val apps = listOf(InstalledApp("com.example.target", "Target", 1234, false))
+    private val mapsRequests = mutableListOf<Int>()
+    private var libraryMaps: String? = """
+        1000-2000 r-xp 00000000 00:00 0 /system/lib64/libalpha.so
+        2000-3000 r--p 00001000 00:00 0 /system/lib64/libalpha.so
+    """.trimIndent()
 
     @Before
     fun setup() {
@@ -58,8 +67,11 @@ class HwbpViewModelTest {
                 server
             },
             configStore = configStore,
+            installedAppsSource = InstalledAppsSource { Result.success(apps) },
             packagePidResolver = HwbpPackagePidResolver { 4321 },
+            mapsSource = ProcMapsSource { pid -> mapsRequests += pid; libraryMaps },
             libraryTargetResolver = HwbpLibraryTargetResolver { _, _, offset, _ -> 0x7a00000000L + offset },
+            libraryNamesResolver = { _, _ -> listOf("libembedded.so", "libalpha.so") },
         )
     }
 
@@ -74,6 +86,25 @@ class HwbpViewModelTest {
 
         verify(exactly = 1) { repo.startEventStream() }
         assertTrue(server.running.value)
+    }
+
+    @Test
+    fun serverOptionsUseInstalledAppsAndMapsForTheSelectedProcess() = runTest {
+        assertEquals(apps, bindings.installedApps().getOrThrow())
+        assertEquals(listOf("libalpha.so", "libembedded.so"),
+            bindings.libraryNames("com.example.target", null).getOrThrow())
+        assertEquals(listOf("libalpha.so", "libembedded.so"), bindings.libraryNames(null, 7654).getOrThrow())
+        assertEquals(listOf(4321, 7654), mapsRequests)
+    }
+
+    @Test
+    fun unreadableMapsAreReportedAsAnOptionLoadingFailure() = runTest {
+        libraryMaps = null
+
+        val result = bindings.libraryNames("com.example.target", null)
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull()?.message.orEmpty().contains("/proc/4321/maps"))
     }
 
     @Test
