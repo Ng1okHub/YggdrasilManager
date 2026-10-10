@@ -16,7 +16,6 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.BugReport
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Visibility
@@ -41,34 +40,24 @@ import ng1ok.yggdrasilmanager.ui.navigation.AppDestination
 
 private data class FeatureItem(
     val destination: AppDestination,
-    val category: String,
-    val description: String,
     val icon: ImageVector
 )
 
 private val features = listOf(
     FeatureItem(
         destination = AppDestination.Syscall,
-        category = "執行期追蹤",
-        description = "透過網頁控制台觀察 ARM64 系統呼叫的參數與返回值",
         icon = Icons.Default.Terminal
     ),
     FeatureItem(
         destination = AppDestination.Hwbp,
-        category = "內存觀察",
-        description = "通過硬件斷點觀察進程內存訪問，實時查看觸發事件",
         icon = Icons.Default.Visibility
     ),
     FeatureItem(
         destination = AppDestination.HideDbg,
-        category = "調試防護",
-        description = "隱藏調試器狀態，支持全局模式和按 App 精確控制",
         icon = Icons.Default.BugReport
     ),
     FeatureItem(
         destination = AppDestination.Maps,
-        category = "記憶體映射防護",
-        description = "依路徑、位址範圍或程序隱藏映射，或改寫其顯示權限",
         icon = Icons.Default.Map
     )
 )
@@ -120,23 +109,11 @@ fun FeaturesScreen(navController: NavController) {
 
 @Composable
 private fun FeatureCard(feature: FeatureItem, onClick: () -> Unit) {
-    val isPrimary = feature.destination == AppDestination.Hwbp
-    val iconContainer = if (isPrimary) {
-        MaterialTheme.colorScheme.primaryContainer
-    } else {
-        MaterialTheme.colorScheme.tertiaryContainer
-    }
-    val iconColor = if (isPrimary) {
-        MaterialTheme.colorScheme.onPrimaryContainer
-    } else {
-        MaterialTheme.colorScheme.onTertiaryContainer
-    }
-
     Card(
         onClick = onClick,
         modifier = Modifier
             .fillMaxWidth()
-            .heightIn(min = 116.dp)
+            .heightIn(min = 80.dp)
             .semantics { role = Role.Button },
         shape = MaterialTheme.shapes.medium,
         colors = CardDefaults.cardColors(
@@ -155,37 +132,13 @@ private fun FeatureCard(feature: FeatureItem, onClick: () -> Unit) {
         ) {
             FeatureIcon(
                 icon = feature.icon,
-                containerColor = iconContainer,
-                contentColor = iconColor
+                containerColor = MaterialTheme.colorScheme.tertiaryContainer,
+                contentColor = MaterialTheme.colorScheme.onTertiaryContainer
             )
-            Column(
+            Text(
                 modifier = Modifier.weight(1f),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
-                Text(
-                    text = feature.category,
-                    style = MaterialTheme.typography.labelMedium,
-                    color = if (isPrimary) {
-                        MaterialTheme.colorScheme.primary
-                    } else {
-                        MaterialTheme.colorScheme.tertiary
-                    }
-                )
-                Text(
-                    text = feature.destination.title,
-                    style = MaterialTheme.typography.titleLarge
-                )
-                Text(
-                    text = feature.description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-            Icon(
-                imageVector = Icons.AutoMirrored.Filled.ArrowForward,
-                contentDescription = null,
-                modifier = Modifier.size(20.dp),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant
+                text = feature.destination.title,
+                style = MaterialTheme.typography.titleLarge
             )
         }
     }

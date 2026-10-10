@@ -215,17 +215,11 @@ private fun RootSummary(
                     )
                 }
             }
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Root 權限",
-                    style = MaterialTheme.typography.titleMedium
-                )
-                Text(
-                    text = "特權操作通道",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+            Text(
+                text = "Root 權限",
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.titleMedium
+            )
             StatusBadge(
                 icon = status.icon,
                 label = status.label,
