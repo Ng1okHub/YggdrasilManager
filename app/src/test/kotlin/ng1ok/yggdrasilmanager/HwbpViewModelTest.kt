@@ -48,6 +48,9 @@ class HwbpViewModelTest {
     private lateinit var configStore: FakeHwbpConfigStore
     private val apps = listOf(InstalledApp("com.example.target", "Target", 1234, false))
     private val mapsRequests = mutableListOf<Int>()
+    private val packageLibraryRequests = mutableListOf<String>()
+    private var packageRunning = true
+    private var packageLibraries: List<String> = listOf("libunloaded.so", "libapp.so", "libapp.so")
     private var libraryMaps: String? = """
         1000-2000 r-xp 00000000 00:00 0 /system/lib64/libalpha.so
         2000-3000 r--p 00001000 00:00 0 /system/lib64/libalpha.so
@@ -68,10 +71,17 @@ class HwbpViewModelTest {
             },
             configStore = configStore,
             installedAppsSource = InstalledAppsSource { Result.success(apps) },
-            packagePidResolver = HwbpPackagePidResolver { 4321 },
+            packagePidResolver = HwbpPackagePidResolver {
+                check(packageRunning) { "Package is not running" }
+                4321
+            },
             mapsSource = ProcMapsSource { pid -> mapsRequests += pid; libraryMaps },
             libraryTargetResolver = HwbpLibraryTargetResolver { _, _, offset, _ -> 0x7a00000000L + offset },
             libraryNamesResolver = { _, _ -> listOf("libembedded.so", "libalpha.so") },
+            packageLibraryNamesResolver = { packageName ->
+                packageLibraryRequests += packageName
+                packageLibraries
+            },
         )
     }
 
@@ -89,22 +99,41 @@ class HwbpViewModelTest {
     }
 
     @Test
-    fun serverOptionsUseInstalledAppsAndMapsForTheSelectedProcess() = runTest {
+    fun serverOptionsUsePackageFilesForAppsAndMapsForPids() = runTest {
         assertEquals(apps, bindings.installedApps().getOrThrow())
-        assertEquals(listOf("libalpha.so", "libembedded.so"),
+        assertEquals(listOf("libapp.so", "libunloaded.so"),
             bindings.libraryNames("com.example.target", null).getOrThrow())
         assertEquals(listOf("libalpha.so", "libembedded.so"), bindings.libraryNames(null, 7654).getOrThrow())
-        assertEquals(listOf(4321, 7654), mapsRequests)
+        assertEquals(listOf("com.example.target"), packageLibraryRequests)
+        assertEquals(listOf(7654), mapsRequests)
+    }
+
+    @Test
+    fun stoppedAppLibrariesDoNotRequirePidResolutionOrReadableMaps() = runTest {
+        packageRunning = false
+        libraryMaps = null
+
+        assertEquals(listOf("libapp.so", "libunloaded.so"),
+            bindings.libraryNames("com.example.target", null).getOrThrow())
+        assertTrue(mapsRequests.isEmpty())
+    }
+
+    @Test
+    fun appWithoutNativeLibrariesDoesNotFallBackToProcessMaps() = runTest {
+        packageLibraries = emptyList()
+
+        assertEquals(emptyList<String>(), bindings.libraryNames("com.example.target", null).getOrThrow())
+        assertTrue(mapsRequests.isEmpty())
     }
 
     @Test
     fun unreadableMapsAreReportedAsAnOptionLoadingFailure() = runTest {
         libraryMaps = null
 
-        val result = bindings.libraryNames("com.example.target", null)
+        val result = bindings.libraryNames(null, 7654)
 
         assertTrue(result.isFailure)
-        assertTrue(result.exceptionOrNull()?.message.orEmpty().contains("/proc/4321/maps"))
+        assertTrue(result.exceptionOrNull()?.message.orEmpty().contains("/proc/7654/maps"))
     }
 
     @Test

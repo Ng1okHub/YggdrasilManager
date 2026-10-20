@@ -369,7 +369,7 @@ internal fun encodeHwbpInstalledApps(apps: List<InstalledApp>): String = buildJs
     })
 }.toString()
 
-/** Encode mapped shared-object names for the library dropdown as a JSON response. */
+/** Encode packaged or mapped shared-object names for library suggestions as a JSON response. */
 internal fun encodeHwbpLibraryNames(libraries: List<String>): String = buildJsonObject {
     put("libraries", buildJsonArray {
         libraries.forEach { library -> add(JsonPrimitive(library)) }

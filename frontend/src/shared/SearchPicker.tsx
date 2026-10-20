@@ -9,10 +9,10 @@ export interface SearchPickerOption {
   content?: ComponentChildren;
 }
 
-/** Render a searchable menu with controlled selection, query, and open state. */
+/** Render a controlled searchable menu, optionally accepting a typed value outside its options. */
 export function SearchPicker({
   options, selected, query, open, disabled, label, placeholder, emptyMessage,
-  onFocus, onClose, onQuery, onSelect,
+  onFocus, onClose, onQuery, onSelect, allowCustomValue = false,
 }: {
   options: SearchPickerOption[];
   selected: string;
@@ -22,6 +22,7 @@ export function SearchPicker({
   label: string;
   placeholder: string;
   emptyMessage: string;
+  allowCustomValue?: boolean;
   onFocus: () => void;
   onClose: () => void;
   onQuery: (value: string) => void;
@@ -33,9 +34,9 @@ export function SearchPicker({
   const [activeValue, setActiveValue] = useState("");
   const matchingOptions = useMemo(() => {
     const search = query.trim().toLowerCase();
-    if (!search || query === selected) return options;
+    if (!search || (!allowCustomValue && query === selected)) return options;
     return options.filter((option) => (option.searchText ?? option.label).toLowerCase().includes(search));
-  }, [options, query, selected]);
+  }, [options, query, selected, allowCustomValue]);
   const activeIndex = matchingOptions.findIndex((option) => option.value === activeValue);
   const optionId = (index: number) => `${id}-option-${index}`;
 
@@ -66,10 +67,11 @@ export function SearchPicker({
         : (open && activeIndex >= 0 ? Math.max(activeIndex - 1, 0) : matchingOptions.length - 1);
       setActiveValue(matchingOptions[nextIndex]?.value ?? "");
     } else if (event.key === "Enter" && open) {
-      // Enter selects a suggestion without submitting the surrounding observe form.
+      // Preserve manually typed names unless the user navigated to a suggestion.
       event.preventDefault();
       const option = matchingOptions[activeIndex >= 0 ? activeIndex : 0];
-      if (option) onSelect(option.value);
+      if (allowCustomValue && activeIndex < 0) onSelect(query.trim());
+      else if (option) onSelect(option.value);
     } else if (event.key === "Escape" && open) {
       event.preventDefault();
       closeMenu();

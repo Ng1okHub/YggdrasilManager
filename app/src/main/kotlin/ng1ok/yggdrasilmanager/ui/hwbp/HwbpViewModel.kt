@@ -31,6 +31,7 @@ import ng1ok.yggdrasilmanager.data.hwbp.EmptyHwbpConfigStore
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigStore
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
+import ng1ok.yggdrasilmanager.data.hwbp.PackageLibraryNames
 import ng1ok.yggdrasilmanager.data.model.HwbpBacktrace
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpEventEnricher
@@ -64,6 +65,7 @@ class HwbpViewModel internal constructor(
     private val libraryNamesResolver: (Int, String) -> List<String> = { pid, mapsText ->
         YggdrasilNative.hwbpListLibraries(pid, mapsText).getOrThrow()
     },
+    private val packageLibraryNamesResolver: (String) -> List<String> = { emptyList() },
 ) : ViewModel() {
     private val _observePoints = MutableStateFlow<List<HwbpObserveParams>>(emptyList())
     val observePoints: StateFlow<List<HwbpObserveParams>> = _observePoints.asStateFlow()
@@ -275,19 +277,20 @@ class HwbpViewModel internal constructor(
         pid: Int?,
     ): Result<List<String>> = withContext(Dispatchers.IO) {
         try {
-            val resolvedPid = when {
+            val names = when {
                 packageName != null && pid == null ->
-                    packagePidResolver.resolve(normalizePackageName(packageName))
-                packageName == null && pid != null && pid > 0 -> pid
+                    packageLibraryNamesResolver(normalizePackageName(packageName))
+                packageName == null && pid != null && pid > 0 -> {
+                    val mapsText = mapsSource.readMaps(pid)
+                        ?: throw IllegalArgumentException(
+                            "Failed to read libraries for pid=$pid " +
+                                "(process missing, no root, or SELinux blocked /proc/$pid/maps)"
+                        )
+                    // Keep named mappings even when ELF metadata cannot be read under the app UID.
+                    libraryNamesResolver(pid, mapsText) + extractHwbpLibraryNames(mapsText)
+                }
                 else -> throw IllegalArgumentException("Specify either packageName or pid")
             }
-            val mapsText = mapsSource.readMaps(resolvedPid)
-                ?: throw IllegalArgumentException(
-                    "Failed to read libraries for pid=$resolvedPid " +
-                        "(process missing, no root, or SELinux blocked /proc/$resolvedPid/maps)"
-                )
-            // Keep named mappings even when ELF metadata cannot be read under the app UID.
-            val names = libraryNamesResolver(resolvedPid, mapsText) + extractHwbpLibraryNames(mapsText)
             Result.success(names.distinct().sortedWith(String.CASE_INSENSITIVE_ORDER.thenBy { it }))
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -352,6 +355,7 @@ class HwbpViewModel internal constructor(
                     },
                     configStore = application.hwbpConfigStore,
                     installedAppsSource = application.installedAppsSource,
+                    packageLibraryNamesResolver = PackageLibraryNames(application.packageManager)::load,
                 )
             }
         }

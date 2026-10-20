@@ -159,7 +159,6 @@ function HwbpEditor({ form, setForm, send, setStatus }: {
     query: string | null; items: string[]; loading: boolean; error: string | null;
   }>({ query: null, items: [], loading: false, error: null });
   const [librariesRevision, setLibrariesRevision] = useState(0);
-  const [librarySearchQuery, setLibrarySearchQuery] = useState<string | null>(null);
   const [libraryMenuOpen, setLibraryMenuOpen] = useState(false);
   const libraryQuery = buildHwbpLibraryQuery(form);
 
@@ -184,7 +183,6 @@ function HwbpEditor({ form, setForm, send, setStatus }: {
   }, [form.processKind, appsRevision]);
 
   useEffect(() => {
-    setLibrarySearchQuery(null);
     setLibraryMenuOpen(false);
     if (form.targetKind !== "lib" || !libraryQuery) {
       setLibraries({ query: libraryQuery, items: [], loading: false, error: null });
@@ -199,7 +197,6 @@ function HwbpEditor({ form, setForm, send, setStatus }: {
           if (controller.signal.aborted) return;
           const items = normalizeHwbpLibraryOptions(payload);
           setLibraries({ query: libraryQuery, items, loading: false, error: null });
-          setForm((current) => items.includes(current.lib) ? current : { ...current, lib: "" });
         })
         .catch((error: unknown) => {
           if (!controller.signal.aborted) setLibraries({
@@ -215,10 +212,9 @@ function HwbpEditor({ form, setForm, send, setStatus }: {
   const libraryOptions = useMemo(() => libraryItems.map((name) => ({ value: name, label: name })), [libraryItems]);
   const librariesLoading = Boolean(libraryQuery) && (libraries.loading || libraries.query !== libraryQuery);
   const processReady = form.processKind === "pid" || (!appsLoading && !appsError && apps.some((app) => app.packageName === form.packageName));
-  const targetReady = form.targetKind === "abs" || (!librariesLoading && libraryItems.includes(form.lib));
+  const targetReady = form.targetKind === "abs" || Boolean(form.lib.trim());
   const update = (patch: Partial<HwbpFormValues>) => {
     if (patch.processKind !== undefined || patch.packageName !== undefined || patch.pid !== undefined) {
-      setLibrarySearchQuery(null);
       setLibraryMenuOpen(false);
     }
     setForm((current) => ({ ...current, ...patch }));
@@ -274,15 +270,16 @@ function HwbpEditor({ form, setForm, send, setStatus }: {
             label="Libname"
             options={libraryOptions}
             selected={form.lib}
-            query={librarySearchQuery ?? form.lib}
+            query={form.lib}
             open={libraryMenuOpen}
-            disabled={!libraryQuery || librariesLoading || !libraryItems.length}
-            placeholder={!libraryQuery ? "請先選擇 App 或輸入 PID" : librariesLoading ? "載入 Library 清單中…" : libraries.error ? "Library 清單讀取失敗" : libraryItems.length ? "搜尋 Library 名稱" : "沒有已載入的 Library"}
-            emptyMessage="找不到符合的 Library"
+            disabled={false}
+            allowCustomValue
+            placeholder="搜尋或輸入 Library（如 libc.so）"
+            emptyMessage={librariesLoading ? "載入 Library 清單中…" : "可直接使用輸入的 Library 名稱"}
             onFocus={() => setLibraryMenuOpen(true)}
             onClose={() => setLibraryMenuOpen(false)}
-            onQuery={(value) => { setLibrarySearchQuery(value); update({ lib: "" }); setLibraryMenuOpen(true); }}
-            onSelect={(value) => { update({ lib: value }); setLibrarySearchQuery(null); setLibraryMenuOpen(false); }}
+            onQuery={(value) => { update({ lib: value }); setLibraryMenuOpen(true); }}
+            onSelect={(value) => { update({ lib: value }); setLibraryMenuOpen(false); }}
           />
           <div className="package-feedback"><p className={`package-status ${libraries.error ? "package-status--error" : ""}`} role="status">{libraries.error || (libraryQuery && !librariesLoading ? `${libraryItems.length} 個 Library` : "")}</p><Button type="button" className="package-reload" disabled={!libraryQuery || librariesLoading} onClick={() => setLibrariesRevision((value) => value + 1)}>重新載入</Button></div></div>
           <Field label="Offset"><input value={form.offset} onInput={(e) => update({ offset: (e.currentTarget as HTMLInputElement).value })} placeholder="0x1234" /></Field>
