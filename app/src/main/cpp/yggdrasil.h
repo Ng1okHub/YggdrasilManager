@@ -34,11 +34,18 @@ typedef uint32_t u32;
 #define PR_YGGDRASIL_GET_VERSION     0x5947000B
 #define PR_YGGDRASIL_SYSCALL_CONFIG  0x5947000C
 #define PR_YGGDRASIL_SYSCALL_READ_EVENT 0x5947000D
+#define PR_YGGDRASIL_PTRACE_SPOOF    0x5947000E
+#define PR_YGGDRASIL_LABEL_SPOOF     0x5947000F
+#define PR_YGGDRASIL_FREEZE          0x59470010
+#define PR_YGGDRASIL_SYSCALL_TRAMPOLINE 0x59470011
+
+/* Cleaner alias for the maps presentation policy (same command value). */
+#define PR_YGGDRASIL_MAPS_POLICY     PR_YGGDRASIL_HIDE_MAPS
 
 /* Version code returned by PR_YGGDRASIL_GET_VERSION: (major << 16) | (minor << 8) | patch */
 #define YGG_VERSION_MAJOR  2
-#define YGG_VERSION_MINOR  1
-#define YGG_VERSION_PATCH  3
+#define YGG_VERSION_MINOR  4
+#define YGG_VERSION_PATCH  0
 #define YGG_VERSION_CODE   ((YGG_VERSION_MAJOR << 16) | (YGG_VERSION_MINOR << 8) | YGG_VERSION_PATCH)
 
 #define YGG__STR(x)        #x
@@ -47,6 +54,7 @@ typedef uint32_t u32;
     YGG__XSTR(YGG_VERSION_MAJOR) "." YGG__XSTR(YGG_VERSION_MINOR) "." YGG__XSTR(YGG_VERSION_PATCH)
 
 #define YGG_HIDE_DBG_F_TARGET_UID    (1U << 0)
+
 struct ygg_hide_dbg_request {
     uint32_t enable;
     uint32_t flags;
@@ -54,37 +62,152 @@ struct ygg_hide_dbg_request {
     uint32_t reserved;
 };
 
-/* Maps presentation policy ABI, shared with the current KPM. */
-#define PR_YGGDRASIL_MAPS_POLICY     PR_YGGDRASIL_HIDE_MAPS
+#define YGG_PTRACE_SPOOF_F_TARGET_PID  (1U << 0)
+
+struct ygg_ptrace_spoof_request {
+    uint32_t enable;
+    uint32_t flags;
+    uint32_t pid;
+    uint32_t reserved;
+};
+
+/*
+ * SELinux label spoofing.
+ *
+ * Instruments inherit fds (e.g. from frida-server) whose inodes were labeled
+ * by the root manager's domain. Answers to getxattr("security.selinux") and
+ * getsockopt(SOL_SOCKET, SO_PEERSEC) issued by a matching task are rewritten
+ * to the task's own context, so neither fd enumeration nor label probing can
+ * observe the inherited ":su:"-style labels.
+ *
+ * The feature starts globally enabled at module load; the prctl interface
+ * below then narrows it to per-uid/per-pid scopes or clears it entirely.
+ */
+#define YGG_LABEL_SPOOF_F_TARGET_UID  (1U << 0)
+#define YGG_LABEL_SPOOF_F_TARGET_PID  (1U << 1)
+
+struct ygg_label_spoof_request {
+    uint32_t enable;
+    uint32_t flags;
+    uint32_t uid;
+    uint32_t pid;
+    uint32_t reserved;
+};
+
+/*
+ * Thread-group freeze.
+ *
+ * PR_YGGDRASIL_FREEZE with enable=1 stops every task in the target thread
+ * group except the calling thread, and makes the group's thread-creation
+ * syscalls (clone/clone3, including the compat fork/vfork variants) fail
+ * with EPERM while the freeze holds. The freeze is per thread group: a
+ * caller freezes its own process by default, or another process by tgid
+ * with YGG_FREEZE_F_TARGET_PID (restricted to root). Stopped tasks still
+ * respond to SIGKILL; /proc will show their true stopped state (pair with
+ * the hide-dbg feature if that must be masked).
+ *
+ * enable=0 reverses the freeze: every task the freeze stopped is resumed
+ * and thread creation is allowed again. Only one thread group may be
+ * frozen at a time; a second freeze returns EBUSY.
+ */
+#define YGG_FREEZE_F_TARGET_PID      (1U << 0)
+#define YGG_FREEZE_DEFAULT_TIMEOUT_MS 2000U
+
+/**
+ * struct ygg_freeze_request - Userspace ABI for PR_YGGDRASIL_FREEZE.
+ * @enable: 1 to freeze, 0 to thaw.
+ * @flags: YGG_FREEZE_F_TARGET_PID selects the thread group named by @pid;
+ *         without it the caller's own group is the target.
+ * @pid: Target TGID in the init PID namespace (TARGET_PID only; must be nonzero).
+ * @timeout_ms: Freeze only: how long to wait for each sibling to enter the
+ *              stopped state, 0 for the default (YGG_FREEZE_DEFAULT_TIMEOUT_MS).
+ * @reserved: Must be zero.
+ * @reserved2: Must be zero.
+ *
+ * On freeze, the return value is 0 when every sibling was observed stopped,
+ * or a positive count of laggards that were left running (their pending
+ * SIGSTOP is disarmed first, so they never stop later). The caller itself is
+ * never stopped. On thaw, the return value is 0.
+ */
+struct ygg_freeze_request {
+    uint32_t enable;
+    uint32_t flags;
+    uint32_t pid;
+    uint32_t timeout_ms;
+    uint32_t reserved;
+    uint32_t reserved2;
+};
+
+/*
+ * Maps presentation policy (formerly "hide maps").
+ *
+ * A policy is an ordered list of rules evaluated against every VMA record that
+ * procfs is about to emit for /proc/<pid>/{maps,smaps,map_files}. Each rule is a
+ * (predicate, action) pair: the predicate selects records by path, by the VMA's
+ * address range, and/or the permissions currently shown, and the action either
+ * HIDEs the record or REWRITEs its rwx field.
+ *
+ * Rules live in a scope: the global scope (every task) when
+ * YGG_MAPS_F_TARGET_PID is clear, or a per-process scope (resolved from `pid`
+ * in the init PID namespace) when it is set. When a global rule and a per-pid
+ * rule both apply to one record, HIDE is the union (either one hides it) while
+ * REWRITE_PERMS is most-specific-wins (a matching per-pid rule overrides a
+ * matching global rule). Per-pid scopes are copied to a forked child's new
+ * address space so policy installed before fork follows subprocesses.
+ */
 #define YGG_MAPS_ABI_VERSION         2U
 #define YGG_MAPS_F_TARGET_PID        (1U << 0)
+/* CLEAR only: wipe the global scope and every per-pid scope in one call.
+ * Mutually exclusive with YGG_MAPS_F_TARGET_PID. */
 #define YGG_MAPS_F_ALL_SCOPES        (1U << 1)
 #define YGG_MAPS_MAX_RULES           32U
 #define YGG_MAPS_PATTERN_MAX         128U
 
 enum ygg_maps_op {
-    YGG_MAPS_OP_ADD_RULE = 1,
-    YGG_MAPS_OP_REMOVE_RULE = 2,
-    YGG_MAPS_OP_CLEAR = 3,
-    YGG_MAPS_OP_GET = 4,
+    YGG_MAPS_OP_ADD_RULE = 1,     /* append `rule` to the scope (idempotent) */
+    YGG_MAPS_OP_REMOVE_RULE = 2,  /* drop rules equal to `rule` from the scope */
+    YGG_MAPS_OP_CLEAR = 3,        /* drop the scope's rules, or every scope's
+                                   * rules with YGG_MAPS_F_ALL_SCOPES */
+    YGG_MAPS_OP_GET = 4,          /* copy the scope's rules into `buffer` */
 };
 
 enum ygg_maps_action {
-    YGG_MAPS_ACTION_HIDE = 1,
-    YGG_MAPS_ACTION_REWRITE_PERMS = 2,
+    YGG_MAPS_ACTION_HIDE = 1,          /* omit the record entirely */
+    YGG_MAPS_ACTION_REWRITE_PERMS = 2, /* overwrite the record's rwx field */
 };
 
 enum ygg_maps_match_kind {
-    YGG_MAPS_MATCH_ANY = 0,
-    YGG_MAPS_MATCH_PATH_SUBSTR = 1,
-    YGG_MAPS_MATCH_PATH_PREFIX = 2,
-    YGG_MAPS_MATCH_PATH_EXACT = 3,
-    YGG_MAPS_MATCH_PATH_BASENAME = 4,
-    YGG_MAPS_MATCH_ADDR_RANGE = 5,
+    YGG_MAPS_MATCH_ANY = 0,           /* path is not considered */
+    YGG_MAPS_MATCH_PATH_SUBSTR = 1,   /* pathname contains `pattern` */
+    YGG_MAPS_MATCH_PATH_PREFIX = 2,   /* pathname starts with `pattern` */
+    YGG_MAPS_MATCH_PATH_EXACT = 3,    /* pathname equals `pattern` */
+    YGG_MAPS_MATCH_PATH_BASENAME = 4, /* basename(pathname) equals `pattern` */
+    YGG_MAPS_MATCH_ADDR_RANGE = 5,    /* VMA overlaps [addr_start, addr_end) */
 };
 
+/* Predicate additionally requires the record's rwx perms to equal match_perms. */
 #define YGG_MAPS_RULE_F_MATCH_PERMS  (1U << 0)
 
+/**
+ * struct ygg_maps_rule - One (predicate, action) entry in a maps policy scope.
+ * @action: enum ygg_maps_action selecting HIDE or REWRITE_PERMS.
+ * @match_kind: enum ygg_maps_match_kind selecting the path or address predicate.
+ * @rule_flags: YGG_MAPS_RULE_F_* modifiers (e.g. add a perms predicate).
+ * @reserved: Must be zero.
+ * @match_perms: rwx string the record must show when YGG_MAPS_RULE_F_MATCH_PERMS.
+ * @set_perms: rwx string written to the record by REWRITE_PERMS.
+ * @addr_start: Inclusive start address matched when @match_kind is ADDR_RANGE.
+ * @addr_end: Exclusive end address matched when @match_kind is ADDR_RANGE.
+ * @pattern: NUL-terminated path operand used with the PATH_* match kinds.
+ *
+ * Permission strings are exactly three characters over {r,w,x,-} plus a NUL, in
+ * the order procfs prints them; the private/shared flag is left untouched.
+ *
+ * An ADDR_RANGE rule matches a record whose VMA [start, end) overlaps the
+ * half-open interval [@addr_start, @addr_end); @addr_end must exceed
+ * @addr_start. It ignores @pattern and is normally paired with a per-pid scope,
+ * since addresses are only meaningful within one address space.
+ */
 struct ygg_maps_rule {
     uint32_t action;
     uint32_t match_kind;
@@ -97,6 +220,20 @@ struct ygg_maps_rule {
     char pattern[YGG_MAPS_PATTERN_MAX];
 };
 
+/**
+ * struct ygg_maps_request - Userspace ABI for PR_YGGDRASIL_MAPS_POLICY.
+ * @size: sizeof(struct ygg_maps_request); the request is rejected on mismatch.
+ * @version: YGG_MAPS_ABI_VERSION.
+ * @op: enum ygg_maps_op.
+ * @flags: YGG_MAPS_F_* scope selectors. TARGET_PID picks a per-pid scope;
+ *         ALL_SCOPES (CLEAR only) wipes the global scope and every per-pid one.
+ * @pid: Target PID (init namespace) when YGG_MAPS_F_TARGET_PID is set.
+ * @reserved: Must be zero.
+ * @rule: Rule operand for ADD_RULE and REMOVE_RULE; ignored otherwise.
+ * @buffer: User pointer receiving a struct ygg_maps_dump for GET.
+ * @buffer_size: Bytes available at @buffer for GET.
+ * @reserved2: Must be zero.
+ */
 struct ygg_maps_request {
     uint32_t size;
     uint32_t version;
@@ -110,6 +247,17 @@ struct ygg_maps_request {
     uint32_t reserved2;
 };
 
+/**
+ * struct ygg_maps_dump - Header written to ygg_maps_request.buffer by GET.
+ * @size: sizeof(struct ygg_maps_dump).
+ * @version: YGG_MAPS_ABI_VERSION.
+ * @scope_global: 1 when the dump is the global scope, 0 for a per-pid scope.
+ * @total_rules: Rules present in the scope (may exceed @copied_rules).
+ * @copied_rules: struct ygg_maps_rule entries that follow this header.
+ * @reserved: Zero.
+ *
+ * @copied_rules contiguous struct ygg_maps_rule records follow the header.
+ */
 struct ygg_maps_dump {
     uint32_t size;
     uint32_t version;
@@ -321,6 +469,92 @@ struct ygg_syscall_read_event_request {
     uint64_t backtrace_buffer;
     uint32_t backtrace_buffer_size;
     uint32_t reserved;
+};
+
+/*
+ * Syscall trampoline ("stramp") - user-mode driven syscall interception.
+ *
+ * A rule redirects the target task's user PC to a registered on_enter
+ * trampoline with the syscall's six arguments in x0-x5 and the syscall
+ * number in x8. The trampoline observes/edits the registers and re-enters
+ * the kernel with svc #0 from its registered landing pad; the kernel-side
+ * handshake (pc == registered pad, x7 == YGG_STRAMP_MAGIC, matching
+ * in-flight state) applies the decision:
+ *
+ *   action 0 (call): run the original syscall with the trampoline's x0-x5
+ *   action 1 (return): skip the original syscall, return x0 to the caller
+ *
+ * In attach mode action 1 is ignored (the original syscall always runs);
+ * replace mode is the single-handler form where the trampoline decides.
+ * With on_leave registered (attach mode only), the original return value
+ * is delivered to a second trampoline the same way, whose x0 becomes the
+ * value the caller finally sees.
+ */
+#define YGG_STRAMP_ABI_VERSION          1U
+#define YGG_STRAMP_REQUEST_SIZE         72U
+
+/* Handshake value the trampoline must place in x7 at re-entry. */
+#define YGG_STRAMP_MAGIC               0x59475452414D5053ULL
+/* x6 action codes: call the original syscall, or synthesize a return. */
+#define YGG_STRAMP_ACTION_CALL          0U
+#define YGG_STRAMP_ACTION_RETURN       1U
+
+/*
+ * Limit interception to the requested TID instead of the whole thread
+ * group named by target_pid.
+ */
+#define YGG_STRAMP_F_SINGLE_THREAD     (1U << 0)
+/* Interpret the target union as a UID instead of a PID. */
+#define YGG_STRAMP_F_TARGET_UID        (1U << 1)
+
+enum ygg_stramp_op {
+    YGG_STRAMP_RULE_SET = 1,
+    YGG_STRAMP_RULE_DELETE = 2,
+    YGG_STRAMP_RULE_CLEAR = 3,
+};
+
+enum ygg_stramp_mode {
+    YGG_STRAMP_MODE_ATTACH = 1,
+    YGG_STRAMP_MODE_REPLACE = 2,
+};
+
+/**
+ * struct ygg_stramp_request - Userspace ABI for syscall-trampoline rules.
+ * @size: Must equal YGG_STRAMP_REQUEST_SIZE.
+ * @version: Must equal YGG_STRAMP_ABI_VERSION.
+ * @op: ygg_stramp_op selector.
+ * @mode: ygg_stramp_mode for SET; ignored (must be 0) otherwise.
+ * @flags: YGG_STRAMP_F_* selector and behavior flags.
+ * @syscall_nr: arm64 native syscall number for SET/DELETE; ALL for CLEAR.
+ * @target_pid: Target TGID (or TID with SINGLE_THREAD) in the init namespace.
+ * @target_uid: Raw real UID when YGG_STRAMP_F_TARGET_UID is set.
+ * @reserved: Must be zero.
+ * @on_enter_addr: Userspace entry of the on_enter trampoline.
+ * @on_leave_addr: Userspace entry of the on_leave trampoline (attach only).
+ * @enter_pad: Userspace pc observed at the on_enter trampoline's svc site
+ *             (the instruction after the svc), where the kernel expects
+ *             the re-entry handshake.
+ * @leave_pad: Userspace pc observed at the on_leave trampoline's svc site.
+ * @user_cookie: Opaque value stored with the rule for caller bookkeeping.
+ */
+struct ygg_stramp_request {
+    uint32_t size;
+    uint32_t version;
+    uint32_t op;
+    uint32_t mode;
+    uint32_t flags;
+    uint32_t syscall_nr;
+    union {
+        /* Zero selects every task; nonzero values use the init PID namespace. */
+        uint32_t target_pid;
+        uint32_t target_uid;
+    };
+    uint32_t reserved;
+    uint64_t on_enter_addr;
+    uint64_t on_leave_addr;
+    uint64_t enter_pad;
+    uint64_t leave_pad;
+    uint64_t user_cookie;
 };
 
 /*
