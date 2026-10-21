@@ -16,7 +16,8 @@ enum class AppDestination(
     Hwbp("hwbp", "HWBP Observe", false),
     Syscall("syscall", "Arm64 Syscall Observe", false),
     HideDbg("hidedbg", "Hide DBG", false),
-    Maps("maps", "Hide Maps", false);
+    Maps("maps", "Hide Maps", false),
+    SelfTest("selftest", "模組自測", false);
 
     val showBackButton: Boolean
         get() = !isTopLevel
