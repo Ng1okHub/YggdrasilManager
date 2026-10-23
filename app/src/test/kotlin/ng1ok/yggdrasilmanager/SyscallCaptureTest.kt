@@ -188,6 +188,62 @@ class SyscallCaptureTest {
     }
 
     @Test
+    fun decodesArm64StructStatFromTheNativeLayout() {
+        val stat = littleEndianData(128)
+            .putLong(0, 100)
+            .putLong(8, 99)
+            .putInt(16, 0x81a4)
+            .putInt(20, 1)
+            .putInt(24, 1000)
+            .putInt(28, 1001)
+            .putLong(32, 0)
+            .putLong(48, 16)
+            .putInt(56, 4096)
+            .putLong(64, 8)
+            .putLong(72, 10)
+            .putLong(80, 20)
+            .putLong(88, 30)
+            .putLong(96, 40)
+            .putLong(104, 50)
+            .putLong(112, 60)
+            .array()
+
+        val value = SyscallCaptureDecoder.decode(
+            1,
+            captureTlv(
+                argIndex = 2,
+                kind = SyscallCapture.KIND_STRUCT,
+                schemaId = SyscallCapture.SCHEMA_STAT,
+                phase = SyscallEvent.PHASE_EXIT,
+                data = stat,
+            ),
+        ).single().value.orEmpty()
+
+        assertEquals(
+            "{mode=0100644 size=16 uid=1000 gid=1001 nlink=1 ino=99 dev=100" +
+                " rdev=0 blksize=4096 blocks=8 atime=10.000000020" +
+                " mtime=30.000000040 ctime=50.000000060}",
+            value,
+        )
+    }
+
+    @Test
+    fun reportsPartialStatRatherThanMisreadingAShortBuffer() {
+        val value = SyscallCaptureDecoder.decode(
+            1,
+            captureTlv(
+                argIndex = 2,
+                kind = SyscallCapture.KIND_STRUCT,
+                schemaId = SyscallCapture.SCHEMA_STAT,
+                phase = SyscallEvent.PHASE_EXIT,
+                data = littleEndianData(64).putInt(16, 0x81a4).array(),
+            ),
+        ).single().value.orEmpty()
+
+        assertTrue(value.startsWith("{partial=true hex="))
+    }
+
+    @Test
     fun exposesStatusWhenNoBytesCouldBeCaptured() {
         val decoded = SyscallCaptureDecoder.decode(
             1,

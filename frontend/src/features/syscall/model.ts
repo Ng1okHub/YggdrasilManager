@@ -242,5 +242,5 @@ export const createRestartListenerCommand = () => ({ type: "restartListener" });
 export function normalizeBacktraceMode(value: unknown): BacktraceMode { const mode = String(value ?? "fp").toLowerCase(); if (mode !== "fp" && mode !== "dwarf") throw new Error("Backtrace mode must be fp or dwarf"); return mode; }
 function parseInteger(value: unknown, label: string): number { const number = Number(value); if (!Number.isInteger(number)) throw new Error(`${label} 必須是整數`); return number; }
 
-const names: Record<number, string> = { 56: "openat", 57: "close", 63: "read", 64: "write", 66: "lseek", 78: "readlinkat", 93: "exit", 94: "exit_group", 220: "clone", 221: "execve", 222: "mmap", 226: "mprotect", 278: "getrandom", 291: "statx" };
+const names: Record<number, string> = { 34: "mkdirat", 35: "unlinkat", 36: "symlinkat", 37: "linkat", 38: "renameat", 43: "statfs", 48: "faccessat", 49: "chdir", 56: "openat", 57: "close", 63: "read", 64: "write", 66: "lseek", 67: "pread64", 68: "pwrite64", 78: "readlinkat", 79: "newfstatat", 93: "exit", 94: "exit_group", 113: "clock_gettime", 200: "bind", 203: "connect", 220: "clone", 221: "execve", 222: "mmap", 226: "mprotect", 278: "getrandom", 291: "statx", 437: "openat2" };
 export function syscallName(nr: unknown): string { return names[Number(nr)] ?? `syscall_${nr}`; }

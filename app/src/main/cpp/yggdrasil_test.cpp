@@ -19,7 +19,6 @@
  *
  * Output: one line per check; final summary; exit code 0 iff nothing failed.
  * An optional argv[1] substring filters which feature sections run.
- * argv[1] == "--probe" only reports module availability and version.
  */
 
 #include <dirent.h>
@@ -49,6 +48,9 @@
 #include <linux/stat.h>
 
 #include "yggdrasil.h"
+/* Shared with the userspace helper: the same capture schema table and the
+ * same renderer the CLI ships, so these checks cover production code. */
+#include "yggdrasil_syscall_format.h"
 
 #ifndef SOL_SOCKET
 #define SOL_SOCKET 1
@@ -1977,13 +1979,21 @@ static long syscall_clear_rules(void)
  *   'O' openat(fixture) -> fd
  *   'B' openat(ptr 1)   -> errno
  *   'U' setuid(2000)    -> 0 on success
+ *   'M' mkdirat(dir)    -> 0 or errno  (symbolic mode/flags formatting)
+ *   'S' newfstatat      -> 0 or errno  (struct stat output capture)
+ *   'L' readlinkat      -> length/errno
+ *   'P' mprotect        -> 0 or errno  (scalar-only signature)
  *   'Q' quit
  */
 static pid_t spawn_syscall_child(const char *fixture, int ready_pipe[2],
                                  int ctl_pipe[2])
 {
     pid_t pid;
+    char mkdir_target[192];
+    char link_target[192];
 
+    snprintf(mkdir_target, sizeof(mkdir_target), "%s.dir", fixture);
+    snprintf(link_target, sizeof(link_target), "%s.sym", fixture);
     if (pipe(ready_pipe) < 0 || pipe(ctl_pipe) < 0)
         return -1;
     pid = fork();
@@ -2035,6 +2045,51 @@ static pid_t spawn_syscall_child(const char *fixture, int ready_pipe[2],
                                (uint64_t)(uint32_t)(syscall(SYS_setuid, 2000)
                                                      ? errno : 0));
                 break;
+            case 'M': {
+                long r = syscall(SYS_mkdirat, AT_FDCWD, mkdir_target, 0777);
+
+                if (r == 0)
+                    syscall(SYS_unlinkat, AT_FDCWD, mkdir_target,
+                            AT_REMOVEDIR);
+                pipe_write_u64(ready_pipe[1],
+                               r < 0 ? (uint64_t)(uint32_t)errno : 0);
+                break;
+            }
+            case 'S': {
+                struct stat st;
+
+                memset(&st, 0, sizeof(st));
+                pipe_write_u64(ready_pipe[1],
+                               (uint64_t)(uint32_t)(
+                                   syscall(SYS_newfstatat, AT_FDCWD, fixture,
+                                           &st, 0) < 0 ? errno : 0));
+                break;
+            }
+            case 'L': {
+                char link[128];
+                long r = syscall(SYS_readlinkat, AT_FDCWD, link_target, link,
+                                 sizeof(link));
+
+                pipe_write_u64(ready_pipe[1],
+                               r < 0 ? (uint64_t)(uint32_t)errno : 0);
+                break;
+            }
+            case 'P': {
+                void *map = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                                 MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+                long r;
+
+                if (map == MAP_FAILED) {
+                    pipe_write_u64(ready_pipe[1],
+                                   (uint64_t)(uint32_t)errno);
+                    break;
+                }
+                r = syscall(SYS_mprotect, map, 4096, PROT_READ);
+                munmap(map, 4096);
+                pipe_write_u64(ready_pipe[1],
+                               r < 0 ? (uint64_t)(uint32_t)errno : 0);
+                break;
+            }
             default:
                 running = 0;
                 break;
@@ -2076,6 +2131,15 @@ static void test_syscall_monitor(void)
              (int)getpid());
     CHECK(write_fixture(fixture, "1234567890abcdef", 16) == 0,
           "syscall fixture file");
+    {
+        char link_path[160];
+
+        snprintf(link_path, sizeof(link_path), "%s.sym", fixture);
+        unlink(link_path);
+        CHECK(syscall(SYS_symlinkat, "ygg_link_target", AT_FDCWD,
+                      link_path) == 0,
+              "syscall fixture symlink");
+    }
 
     pid = spawn_syscall_child(fixture, rpipe, cpipe);
     CHECK(pid > 0, "syscall child running");
@@ -2279,6 +2343,376 @@ static void test_syscall_monitor(void)
         CHECK(syscall_clear_rules() == 0, "clear rules after fault");
     }
 
+    /*
+     * --- symbolic argument formatting (no kernel involvement) ---
+     *
+     * These exercise the same renderer and schema table the CLI uses, since
+     * both now come from yggdrasil_syscall_format.h. No module state is
+     * touched: this is pure string formatting.
+     */
+    {
+        CHECK(format_syscall_arg(ARG_DIRFD, (uint64_t)(int64_t)AT_FDCWD) ==
+                  "AT_FDCWD",
+              "format: dirfd AT_FDCWD");
+        CHECK(format_syscall_arg(ARG_MODE, 0777) == "0777",
+              "format: mode is octal");
+        CHECK(format_syscall_arg(ARG_PROT, PROT_READ | PROT_WRITE) ==
+                  "PROT_READ|PROT_WRITE",
+              "format: prot flags joined");
+        CHECK(format_syscall_arg(ARG_PROT, 0) == "PROT_NONE",
+              "format: prot zero is PROT_NONE");
+        CHECK(format_syscall_arg(ARG_ACCESS_MODE, R_OK | X_OK) == "R_OK|X_OK",
+              "format: access mode flags");
+        CHECK(format_syscall_arg(ARG_ACCESS_MODE, 0) == "F_OK",
+              "format: access mode zero is F_OK");
+        CHECK(format_syscall_arg(ARG_AT_REMOVEDIR, AT_REMOVEDIR) ==
+                  "AT_REMOVEDIR",
+              "format: unlinkat AT_REMOVEDIR");
+        CHECK(format_syscall_arg(ARG_AT_STAT, AT_SYMLINK_NOFOLLOW) ==
+                  "AT_SYMLINK_NOFOLLOW",
+              "format: newfstatat flags");
+        /* An unnamed bit must fall back to hex, never be silently dropped. */
+        CHECK(format_syscall_arg(ARG_AT_STAT, 0x80000000ULL) == "0x80000000",
+              "format: unknown flag bit falls back to hex");
+        CHECK(format_syscall_arg(ARG_UINT, 4096) == "4096",
+              "format: length is decimal");
+        CHECK(format_syscall_arg(ARG_INT, (uint64_t)(int64_t)-1) == "-1",
+              "format: signed length is negative");
+    }
+
+    /*
+     * The schema table decides what --capture auto asks the kernel for, so
+     * check the entries this change added (and the one it removed).
+     */
+    {
+        struct ygg_syscall_rule_request areq;
+        uint32_t both = YGG_SYSCALL_F_TRACE_ENTER | YGG_SYSCALL_F_TRACE_EXIT;
+
+        memset(&areq, 0, sizeof(areq));
+        CHECK_EQ(populate_auto_capture_descriptors(
+                     79, both, YGG_SYSCALL_CAPTURE_PAYLOAD_MAX, &areq),
+                 0, "schema: newfstatat has a schema");
+        CHECK_EQ(areq.capture_count, 2U,
+                 "schema: newfstatat captures path and statbuf");
+        CHECK_EQ(areq.captures[0].arg_index, 1U, "schema: path is arg1");
+        CHECK_EQ(areq.captures[0].kind,
+                 (uint32_t)YGG_SYSCALL_CAPTURE_CSTRING,
+                 "schema: path is a cstring");
+        CHECK_EQ(areq.captures[1].arg_index, 2U, "schema: statbuf is arg2");
+        CHECK_EQ(areq.captures[1].schema_id,
+                 (uint32_t)YGG_SYSCALL_SCHEMA_STAT,
+                 "schema: statbuf uses the new stat schema");
+        CHECK_EQ(areq.captures[1].fixed_length, 128U,
+                 "schema: statbuf is the 128-byte arm64 struct stat");
+        CHECK_EQ(areq.captures[1].phase_mask,
+                 (uint32_t)YGG_SYSCALL_CAPTURE_PHASE_EXIT,
+                 "schema: statbuf is captured on exit");
+
+        /* Phase gating: an enter-only rule must not ask for exit captures. */
+        memset(&areq, 0, sizeof(areq));
+        CHECK_EQ(populate_auto_capture_descriptors(
+                     79, YGG_SYSCALL_F_TRACE_ENTER,
+                     YGG_SYSCALL_CAPTURE_PAYLOAD_MAX, &areq),
+                 0, "schema: newfstatat enter-only still has a capture");
+        CHECK_EQ(areq.capture_count, 1U,
+                 "schema: exit capture dropped without trace-exit");
+
+        /* mprotect is scalar-only: nothing to capture, so no schema. */
+        memset(&areq, 0, sizeof(areq));
+        CHECK_EQ(populate_auto_capture_descriptors(
+                     226, both, YGG_SYSCALL_CAPTURE_PAYLOAD_MAX, &areq),
+                 -1, "schema: mprotect has no capture schema");
+
+        /* openat2 lost its automatic argument parsing. */
+        memset(&areq, 0, sizeof(areq));
+        CHECK_EQ(populate_auto_capture_descriptors(
+                     437, both, YGG_SYSCALL_CAPTURE_PAYLOAD_MAX, &areq),
+                 -1, "schema: openat2 no longer auto-parses");
+    }
+
+    /* Full call lines; NULL pending means "no across-phase merge needed". */
+    {
+        struct ygg_syscall_event fev;
+        std::vector<struct syscall_capture_view> nocaps;
+        std::string line;
+
+        memset(&fev, 0, sizeof(fev));
+        fev.phase = YGG_SYSCALL_PHASE_ENTER;
+        fev.call_id = 1;
+        fev.syscall_nr = 34;    /* mkdirat */
+        fev.args_after[0] = (uint64_t)(int64_t)AT_FDCWD;
+        fev.args_after[1] = 0x7fc0123456ULL;
+        fev.args_after[2] = 0777;
+        CHECK(format_syscall_call_line(&fev, nocaps, NULL) ==
+                  "mkdirat(dirfd=AT_FDCWD, pathname=0x7fc0123456, mode=0777)",
+              "call: mkdirat all args named (path stays hex without capture)");
+
+        fev.syscall_nr = 226;   /* mprotect: scalar-only signature */
+        fev.args_after[0] = 0x7fc0100000ULL;
+        fev.args_after[1] = 4096;
+        fev.args_after[2] = PROT_READ | PROT_WRITE | PROT_EXEC;
+        CHECK(format_syscall_call_line(&fev, nocaps, NULL) ==
+                  "mprotect(addr=0x7fc0100000, len=4096,"
+                  " prot=PROT_READ|PROT_WRITE|PROT_EXEC)",
+              "call: mprotect formats all three args");
+
+        fev.syscall_nr = 43;    /* statfs: arg0 only */
+        fev.args_after[0] = 0x3333;
+        CHECK(format_syscall_call_line(&fev, nocaps, NULL) ==
+                  "statfs(pathname=0x3333)",
+              "call: statfs names just arg0");
+
+        fev.syscall_nr = 437;   /* openat2: name kept, no auto-parse */
+        CHECK(format_syscall_call_line(&fev, nocaps, NULL).empty(),
+              "call: openat2 deliberately has no signature");
+
+        fev.syscall_nr = 57;    /* close: no signature at all */
+        CHECK(format_syscall_call_line(&fev, nocaps, NULL).empty(),
+              "call: unlisted syscall produces no line");
+    }
+
+    /*
+     * --- end-to-end: the kernel really auto-captures for these syscalls ---
+     *
+     * A "call:" line is only useful if the payload it decodes actually
+     * arrives, so capture the pathname bytes for each newly added syscall and
+     * assert both the TLV metadata and the decoded value.
+     */
+    {
+        struct {
+            uint32_t nr;
+            uint8_t arg_index;
+            char cmd;
+            const char *label;
+        } probes[] = {
+            { 34, 1, 'M', "mkdirat" },
+            { 79, 1, 'S', "newfstatat" },
+            { 78, 1, 'L', "readlinkat" },
+        };
+        size_t p;
+
+        for (p = 0; p < sizeof(probes) / sizeof(probes[0]); p++) {
+            /*
+             * Build the rule through the very same helper --capture auto
+             * uses. Hand-writing the descriptor here would pass even if the
+             * schema table named the wrong argument, which is the bug this
+             * test exists to catch.
+             */
+            syscall_rule_init(&req);
+            req.syscall_nr = probes[p].nr;
+            req.flags = YGG_SYSCALL_F_TRACE_ENTER;
+            req.target_pid = (uint32_t)pid;
+            req.user_cookie = probes[p].nr;
+            CHECK_EQ(populate_auto_capture_descriptors(
+                         req.syscall_nr, req.flags,
+                         YGG_SYSCALL_CAPTURE_PAYLOAD_MAX, &req),
+                     0, "capture: schema table yields descriptors");
+            CHECK_EQ(req.capture_count, 1U,
+                     "capture: enter-only rule has one descriptor");
+            CHECK_EQ(req.captures[0].arg_index, probes[p].arg_index,
+                     "capture: schema names the pathname argument");
+            CHECK_EQ(req.captures[0].kind,
+                     (uint32_t)YGG_SYSCALL_CAPTURE_CSTRING,
+                     "capture: schema says cstring");
+            CHECK(syscall_rule_set(&req) == 0,
+                  "capture: rule installed");
+
+            drain_events();
+            pipe_putc(cpipe[1], probes[p].cmd);
+            pipe_read_u64(rpipe[0], &answer);
+            CHECK_EQ(answer, 0, "capture: child syscall succeeded");
+
+            {
+                int seen = 0;
+                int tries;
+
+                for (tries = 0; tries < 8; tries++) {
+                    const struct ygg_syscall_capture_tlv *tlv;
+                    std::string rendered;
+
+                    if (syscall_read_event(&record, NULL) < 0)
+                        break;
+                    if (record.event.syscall_nr != probes[p].nr)
+                        continue;
+                    if (record.event.phase != YGG_SYSCALL_PHASE_ENTER)
+                        continue;
+                    if (!(record.event.event_flags &
+                          YGG_SYSCALL_EVENT_F_HAS_CAPTURES))
+                        continue;
+                    tlv = (const struct ygg_syscall_capture_tlv *)
+                              ((uint8_t *)&record + record.event.header_size);
+                    CHECK_EQ(tlv->arg_index, probes[p].arg_index,
+                             "capture: arg index in TLV");
+                    CHECK_EQ(tlv->kind,
+                             (uint32_t)YGG_SYSCALL_CAPTURE_CSTRING,
+                             "capture: TLV kind is cstring");
+                    CHECK_EQ(tlv->status, 0U, "capture: TLV status ok");
+                    CHECK_EQ(tlv->phase,
+                             (uint32_t)YGG_SYSCALL_CAPTURE_PHASE_ENTER,
+                             "capture: TLV phase is enter");
+                    CHECK((const char *)tlv + sizeof(*tlv) != NULL &&
+                              strstr((const char *)tlv + sizeof(*tlv),
+                                     "syscall_") != NULL,
+                          "capture: payload holds the fixture path");
+
+                    /*
+                     * Feed the real payload back through the renderer: this is
+                     * what turns a captured pointer into pathname="...".
+                     */
+                    {
+                        struct syscall_capture_view view;
+                        std::vector<struct syscall_capture_view> caps;
+                        struct ygg_syscall_event fev;
+
+                        memset(&view, 0, sizeof(view));
+                        view.tlv = *tlv;
+                        view.data = (const uint8_t *)tlv + sizeof(*tlv);
+                        caps.push_back(view);
+                        memset(&fev, 0, sizeof(fev));
+                        fev.phase = YGG_SYSCALL_PHASE_ENTER;
+                        fev.call_id = record.event.call_id;
+                        fev.syscall_nr = probes[p].nr;
+                        memcpy(fev.args_after, record.event.args_after,
+                               sizeof(fev.args_after));
+                        rendered = format_syscall_call_line(&fev, caps, NULL);
+                        CHECK(rendered.find("pathname=\"") != std::string::npos,
+                              "capture: renderer decodes pathname");
+                        CHECK(rendered.find("syscall_") != std::string::npos,
+                              "capture: decoded value names the fixture");
+                    }
+                    seen = 1;
+                }
+                CHECK(seen, "capture: event with payload observed");
+            }
+            CHECK(syscall_clear_rules() == 0, "capture: rules cleared");
+        }
+    }
+
+    /*
+     * --- end-to-end: path captured on enter, struct stat on exit ---
+     *
+     * newfstatat fills a struct stat, so one "call:" line needs the path from
+     * the enter event and the statbuf from the exit event. This drives the
+     * real --capture auto descriptors, keeps the kernel's own captured bytes,
+     * and replays them through the renderer: if the offsets, the schema id or
+     * the enter/exit correlation were wrong, the decoded line would not match
+     * the file this test just created.
+     */
+    {
+        syscall_pending_args pending;
+        static uint8_t enter_payload[YGG_SYSCALL_CAPTURE_PAYLOAD_MAX];
+        static uint8_t exit_payload[YGG_SYSCALL_CAPTURE_PAYLOAD_MAX];
+        struct ygg_syscall_capture_tlv enter_tlv;
+        struct ygg_syscall_capture_tlv exit_tlv;
+        struct ygg_syscall_event enter_ev;
+        struct ygg_syscall_event exit_ev;
+        size_t enter_bytes = 0;
+        size_t exit_bytes = 0;
+        int tries;
+
+        syscall_rule_init(&req);
+        req.syscall_nr = 79;    /* newfstatat */
+        req.flags = YGG_SYSCALL_F_TRACE_ENTER | YGG_SYSCALL_F_TRACE_EXIT;
+        req.target_pid = (uint32_t)pid;
+        req.user_cookie = 0x79;
+        CHECK_EQ(populate_auto_capture_descriptors(
+                     req.syscall_nr, req.flags,
+                     YGG_SYSCALL_CAPTURE_PAYLOAD_MAX, &req),
+                 0, "exit-capture: auto descriptors for newfstatat");
+        CHECK_EQ(req.capture_count, 2U,
+                 "exit-capture: path plus statbuf requested");
+        CHECK(syscall_rule_set(&req) == 0,
+              "exit-capture: newfstatat rule installed");
+
+        drain_events();
+        pipe_putc(cpipe[1], 'S');
+        pipe_read_u64(rpipe[0], &answer);
+        CHECK_EQ(answer, 0, "exit-capture: child newfstatat succeeded");
+
+        memset(&enter_tlv, 0, sizeof(enter_tlv));
+        memset(&exit_tlv, 0, sizeof(exit_tlv));
+        memset(&enter_ev, 0, sizeof(enter_ev));
+        memset(&exit_ev, 0, sizeof(exit_ev));
+        for (tries = 0; tries < 12; tries++) {
+            const struct ygg_syscall_capture_tlv *tlv;
+            size_t payload;
+
+            if (syscall_read_event(&record, NULL) < 0)
+                break;
+            if (record.event.syscall_nr != 79)
+                continue;
+            if (!(record.event.event_flags &
+                  YGG_SYSCALL_EVENT_F_HAS_CAPTURES))
+                continue;
+            if (record.event.capture_count != 1)
+                continue;   /* one capture per phase for this rule */
+            tlv = (const struct ygg_syscall_capture_tlv *)
+                      ((uint8_t *)&record + record.event.header_size);
+            payload = tlv->captured_length;
+            if (payload > YGG_SYSCALL_CAPTURE_PAYLOAD_MAX)
+                continue;
+            if (record.event.phase == YGG_SYSCALL_PHASE_ENTER) {
+                enter_tlv = *tlv;
+                enter_ev = record.event;
+                memcpy(enter_payload, (const uint8_t *)tlv + sizeof(*tlv),
+                       payload);
+                enter_bytes = payload;
+            } else if (record.event.phase == YGG_SYSCALL_PHASE_EXIT) {
+                exit_tlv = *tlv;
+                exit_ev = record.event;
+                memcpy(exit_payload, (const uint8_t *)tlv + sizeof(*tlv),
+                       payload);
+                exit_bytes = payload;
+            }
+        }
+        CHECK(enter_bytes > 0, "exit-capture: enter payload captured");
+        CHECK(exit_bytes > 0, "exit-capture: exit payload captured");
+        CHECK_EQ(enter_tlv.kind, (uint32_t)YGG_SYSCALL_CAPTURE_CSTRING,
+                 "exit-capture: enter payload is the path");
+        CHECK_EQ(exit_tlv.kind, (uint32_t)YGG_SYSCALL_CAPTURE_STRUCT,
+                 "exit-capture: exit payload is a struct");
+        CHECK_EQ(exit_tlv.schema_id, (uint32_t)YGG_SYSCALL_SCHEMA_STAT,
+                 "exit-capture: exit payload is struct stat");
+        CHECK_EQ(exit_bytes, 128U, "exit-capture: struct stat is 128 bytes");
+
+        if (enter_bytes > 0 && exit_bytes > 0) {
+            struct syscall_capture_view view;
+            std::vector<struct syscall_capture_view> caps;
+            std::string enter_line;
+            std::string merged;
+
+            /* Enter first: it stashes the path for the exit event to reuse. */
+            memset(&view, 0, sizeof(view));
+            view.tlv = enter_tlv;
+            view.data = enter_payload;
+            caps.push_back(view);
+            enter_line = format_syscall_call_line(&enter_ev, caps, &pending);
+            CHECK(enter_line.find("pathname=\"") != std::string::npos,
+                  "exit-capture: enter line decodes the path");
+
+            caps.clear();
+            memset(&view, 0, sizeof(view));
+            view.tlv = exit_tlv;
+            view.data = exit_payload;
+            caps.push_back(view);
+            merged = format_syscall_call_line(&exit_ev, caps, &pending);
+            printf("     newfstatat exit line: %s\n", merged.c_str());
+
+            CHECK(merged.find("pathname=\"") != std::string::npos,
+                  "exit-capture: exit line carries the enter path");
+            CHECK(merged.find("statbuf={") != std::string::npos,
+                  "exit-capture: statbuf decoded as struct stat, not hex");
+            /* The fixture is a 0644 regular file of 16 bytes. */
+            CHECK(merged.find("mode=0100644") != std::string::npos,
+                  "exit-capture: statbuf mode matches the fixture file");
+            CHECK(merged.find("size=16") != std::string::npos,
+                  "exit-capture: statbuf size matches the fixture file");
+            CHECK(pending.empty(),
+                  "exit-capture: correlation store drained by the exit event");
+        }
+        CHECK(syscall_clear_rules() == 0, "exit-capture: rules cleared");
+    }
+
     /* --- uid-scope rule: a child that drops to uid 2000 --- */
     {
         pipe_putc(cpipe[1], 'U');
@@ -2353,6 +2787,12 @@ static void test_syscall_monitor(void)
 
     pipe_putc(cpipe[1], 'Q');
     waitpid(pid, NULL, 0);
+    {
+        char link_path[160];
+
+        snprintf(link_path, sizeof(link_path), "%s.sym", fixture);
+        unlink(link_path);
+    }
     unlink(fixture);
 }
 
@@ -3500,10 +3940,6 @@ static void reset_module_state(void)
 int main(int argc, char **argv)
 {
     const char *filter = argc > 1 ? argv[1] : NULL;
-    /* Manager integration: --probe reports availability/version without
-     * running a section, so the UI can smoke-test the binary without
-     * touching any module state. */
-    int probe = filter && !strcmp(filter, "--probe");
     size_t i;
 
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -3518,8 +3954,6 @@ int main(int argc, char **argv)
     }
     printf("module version: 0x%lx\n",
            (unsigned long)prctl(PR_YGGDRASIL_GET_VERSION, 0, 0, 0, 0));
-    if (probe)
-        return 0;
 
     for (i = 0; i < sizeof(g_features) / sizeof(g_features[0]); i++) {
         const struct test_feature *f = &g_features[i];

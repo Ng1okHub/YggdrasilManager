@@ -113,8 +113,11 @@ object Arm64SyscallCatalog {
         24 to "dup3",
         25 to "fcntl",
         29 to "ioctl",
+        34 to "mkdirat",
         35 to "unlinkat",
+        36 to "symlinkat",
         37 to "linkat",
+        38 to "renameat",
         40 to "mount",
         41 to "pivot_root",
         43 to "statfs",
@@ -143,7 +146,7 @@ object Arm64SyscallCatalog {
         72 to "pselect6",
         73 to "ppoll",
         78 to "readlinkat",
-        79 to "fstatat",
+        79 to "newfstatat",
         80 to "fstat",
         88 to "utimensat",
         93 to "exit",
@@ -193,6 +196,7 @@ object Arm64SyscallCatalog {
         278 to "getrandom",
         281 to "execveat",
         291 to "statx",
+        437 to "openat2",
     )
 
     fun nameFor(syscallNr: Int): String = names[syscallNr] ?: "syscall_$syscallNr"

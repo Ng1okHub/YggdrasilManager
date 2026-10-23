@@ -95,10 +95,12 @@ def buildYggdrasilSelfTest = tasks.register("buildYggdrasilSelfTest", Exec) {
     def cppDir = file("src/main/cpp")
     def sourceFile = file("src/main/cpp/yggdrasil_test.cpp")
     def headerFile = file("src/main/cpp/yggdrasil.h")
+    def formatHeaderFile = file("src/main/cpp/yggdrasil_syscall_format.h")
     def outputFile = selfTestAssetsDir.map { it.file("yggdrasil_test/arm64-v8a/yggdrasil_test") }
 
     inputs.file(sourceFile)
     inputs.file(headerFile)
+    inputs.file(formatHeaderFile)
     inputs.property("ndkDirectory", selfTestNdkDirectory.map { it.asFile.absolutePath })
     outputs.file(outputFile)
 

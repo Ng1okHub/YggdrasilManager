@@ -41,6 +41,7 @@ data class SyscallCapture(
             SCHEMA_STATX -> "statx"
             SCHEMA_TIMESPEC64 -> "timespec64"
             SCHEMA_SOCKADDR -> "sockaddr"
+            SCHEMA_STAT -> "stat"
             else -> "unknown"
         }
 
@@ -69,6 +70,7 @@ data class SyscallCapture(
         const val SCHEMA_STATX = 2
         const val SCHEMA_TIMESPEC64 = 3
         const val SCHEMA_SOCKADDR = 4
+        const val SCHEMA_STAT = 5
 
         const val STATUS_NULL = 1 shl 0
         const val STATUS_FAULT = 1 shl 1
@@ -131,7 +133,7 @@ internal object SyscallCaptureDecoder {
             require(kind in SyscallCapture.KIND_CSTRING..SyscallCapture.KIND_STRUCT) {
                 "invalid capture $index kind: $kind"
             }
-            require(schemaId in SyscallCapture.SCHEMA_NONE..SyscallCapture.SCHEMA_SOCKADDR) {
+            require(schemaId in SyscallCapture.SCHEMA_NONE..SyscallCapture.SCHEMA_STAT) {
                 "invalid capture $index schema: $schemaId"
             }
             require(schemaId == SyscallCapture.SCHEMA_NONE || kind == SyscallCapture.KIND_STRUCT) {
@@ -185,6 +187,7 @@ internal object SyscallCaptureDecoder {
             SyscallCapture.SCHEMA_STATX -> decodeStatx(data)
             SyscallCapture.SCHEMA_TIMESPEC64 -> decodeTimespec64(data)
             SyscallCapture.SCHEMA_SOCKADDR -> decodeSockaddr(data)
+            SyscallCapture.SCHEMA_STAT -> decodeStat(data)
             else -> "{hex=${data.hexBytes()}}"
         }
     }
@@ -286,6 +289,33 @@ internal object SyscallCaptureDecoder {
                 "groups=0x${data.readLe32(8).toString(16)}}"
         }
         return "{family=$family hex=${data.copyOfRange(2, data.size).hexBytes()}}"
+    }
+
+    /**
+     * arm64 (asm-generic) `struct stat`, the native 128-byte layout newfstatat
+     * fills in. Field order and offsets mirror the module's own renderer.
+     */
+    private fun decodeStat(data: ByteArray): String {
+        if (data.size < 128) return "{partial=true hex=${data.hexBytes()}}"
+        return buildString {
+            append("{mode=0").append(data.readLe32(16).toString(8))
+            append(" size=").append(data.readLe64(48))
+            append(" uid=").append(data.readLe32(24))
+            append(" gid=").append(data.readLe32(28))
+            append(" nlink=").append(data.readLe32(20))
+            append(" ino=").append(data.readLe64(8).decimalUnsigned())
+            append(" dev=").append(data.readLe64(0).decimalUnsigned())
+            append(" rdev=").append(data.readLe64(32).decimalUnsigned())
+            append(" blksize=").append(data.readLe32(56).toInt())
+            append(" blocks=").append(data.readLe64(64))
+            append(" atime=").append(data.readLe64(72)).append('.')
+                .append(data.readLe64(80).decimalUnsigned().padStart(9, '0'))
+            append(" mtime=").append(data.readLe64(88)).append('.')
+                .append(data.readLe64(96).decimalUnsigned().padStart(9, '0'))
+            append(" ctime=").append(data.readLe64(104)).append('.')
+                .append(data.readLe64(112).decimalUnsigned().padStart(9, '0'))
+            append('}')
+        }
     }
 
     private fun formatIpv6(address: ByteArray): String {

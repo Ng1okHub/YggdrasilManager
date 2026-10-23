@@ -45,7 +45,7 @@ typedef uint32_t u32;
 /* Version code returned by PR_YGGDRASIL_GET_VERSION: (major << 16) | (minor << 8) | patch */
 #define YGG_VERSION_MAJOR  2
 #define YGG_VERSION_MINOR  4
-#define YGG_VERSION_PATCH  0
+#define YGG_VERSION_PATCH  1
 #define YGG_VERSION_CODE   ((YGG_VERSION_MAJOR << 16) | (YGG_VERSION_MINOR << 8) | YGG_VERSION_PATCH)
 
 #define YGG__STR(x)        #x
@@ -271,7 +271,7 @@ struct ygg_maps_dump {
 /* KernelPatch exposes 460 name slots; each target is checked at runtime. */
 #define YGG_ARM64_SYSCALL_COUNT          460U
 #define YGG_SYSCALL_NR_ALL               0xffffffffU
-#define YGG_SYSCALL_ABI_VERSION           3U
+#define YGG_SYSCALL_ABI_VERSION           4U
 #define YGG_SYSCALL_RULE_REQUEST_SIZE     256U
 #define YGG_SYSCALL_EVENT_HEADER_SIZE     224U
 #define YGG_SYSCALL_CAPTURE_TLV_SIZE      32U
@@ -350,6 +350,7 @@ enum ygg_syscall_capture_schema {
     YGG_SYSCALL_SCHEMA_STATX = 2,
     YGG_SYSCALL_SCHEMA_TIMESPEC64 = 3,
     YGG_SYSCALL_SCHEMA_SOCKADDR = 4,
+    YGG_SYSCALL_SCHEMA_STAT = 5,
 };
 
 enum ygg_syscall_event_abi {

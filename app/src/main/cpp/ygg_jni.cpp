@@ -14,6 +14,7 @@
 #include <vector>
 
 #include "yggdrasil.h"
+#include "yggdrasil_syscall_format.h"
 #include "ygg_backtrace.h"
 
 // Diagnostic logging for the syscall-observe listener. Filter with:
@@ -63,130 +64,9 @@ static_assert(sizeof(struct ygg_syscall_backtrace_event) ==
                   YGG_SYSCALL_BACKTRACE_EVENT_HEADER_SIZE,
               "unexpected syscall backtrace ABI layout");
 
-/* Keep this table in lockstep with yggdrasil_client.cpp's automatic schema. */
-struct syscall_capture_template {
-    uint8_t arg_index;
-    uint8_t phase_mask;
-    uint8_t kind;
-    uint8_t length_source;
-    uint8_t length_arg;
-    uint16_t flags;
-    uint16_t schema_id;
-    uint32_t fixed_length;
-    uint32_t max_length;
-};
-
-struct arm64_syscall_schema {
-    uint32_t nr;
-    uint8_t capture_count;
-    syscall_capture_template captures[2];
-};
-
-static const arm64_syscall_schema kArm64SyscallSchemas[] = {
-    { 56, 1, {
-        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_CSTRING,
-          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0, 0, YGG_SYSCALL_SCHEMA_NONE,
-          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
-    } },
-    { 63, 1, {
-        { 1, YGG_SYSCALL_CAPTURE_PHASE_EXIT, YGG_SYSCALL_CAPTURE_BYTES,
-          YGG_SYSCALL_CAPTURE_LENGTH_ARG_RETURN_MIN, 2,
-          YGG_SYSCALL_CAPTURE_F_SUCCESS_ONLY, YGG_SYSCALL_SCHEMA_NONE,
-          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
-    } },
-    { 64, 1, {
-        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_BYTES,
-          YGG_SYSCALL_CAPTURE_LENGTH_ARG, 2, 0, YGG_SYSCALL_SCHEMA_NONE,
-          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
-    } },
-    { 67, 1, {
-        { 1, YGG_SYSCALL_CAPTURE_PHASE_EXIT, YGG_SYSCALL_CAPTURE_BYTES,
-          YGG_SYSCALL_CAPTURE_LENGTH_ARG_RETURN_MIN, 2,
-          YGG_SYSCALL_CAPTURE_F_SUCCESS_ONLY, YGG_SYSCALL_SCHEMA_NONE,
-          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
-    } },
-    { 68, 1, {
-        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_BYTES,
-          YGG_SYSCALL_CAPTURE_LENGTH_ARG, 2, 0, YGG_SYSCALL_SCHEMA_NONE,
-          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
-    } },
-    { 113, 1, {
-        { 1, YGG_SYSCALL_CAPTURE_PHASE_EXIT, YGG_SYSCALL_CAPTURE_STRUCT,
-          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0,
-          YGG_SYSCALL_CAPTURE_F_SUCCESS_ONLY,
-          YGG_SYSCALL_SCHEMA_TIMESPEC64, 16, 16 },
-    } },
-    { 200, 1, {
-        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_STRUCT,
-          YGG_SYSCALL_CAPTURE_LENGTH_ARG, 2, 0,
-          YGG_SYSCALL_SCHEMA_SOCKADDR, 0, 128 },
-    } },
-    { 203, 1, {
-        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_STRUCT,
-          YGG_SYSCALL_CAPTURE_LENGTH_ARG, 2, 0,
-          YGG_SYSCALL_SCHEMA_SOCKADDR, 0, 128 },
-    } },
-    { 221, 1, {
-        { 0, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_CSTRING,
-          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0, 0, YGG_SYSCALL_SCHEMA_NONE,
-          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
-    } },
-    { 291, 2, {
-        { 1, YGG_SYSCALL_CAPTURE_PHASE_ENTER, YGG_SYSCALL_CAPTURE_CSTRING,
-          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0, 0, YGG_SYSCALL_SCHEMA_NONE,
-          0, YGG_SYSCALL_CAPTURE_BYTES_MAX },
-        { 4, YGG_SYSCALL_CAPTURE_PHASE_EXIT, YGG_SYSCALL_CAPTURE_STRUCT,
-          YGG_SYSCALL_CAPTURE_LENGTH_FIXED, 0,
-          YGG_SYSCALL_CAPTURE_F_SUCCESS_ONLY, YGG_SYSCALL_SCHEMA_STATX,
-          256, 256 },
-    } },
-};
-
-static const arm64_syscall_schema *find_arm64_syscall_schema(uint32_t nr) {
-    for (const auto &schema : kArm64SyscallSchemas) {
-        if (schema.nr == nr) return &schema;
-    }
-    return nullptr;
-}
-
-static void populate_auto_capture_descriptors(
-        uint32_t syscall_nr, uint32_t trace_flags,
-        ygg_syscall_rule_request *request) {
-    if (!request) return;
-    request->capture_count = 0;
-    request->capture_total_limit = 0;
-
-    const arm64_syscall_schema *schema = find_arm64_syscall_schema(syscall_nr);
-    if (!schema) return;
-    uint8_t enabled_phases = 0;
-    if (trace_flags & YGG_SYSCALL_F_TRACE_ENTER)
-        enabled_phases |= YGG_SYSCALL_CAPTURE_PHASE_ENTER;
-    if (trace_flags & YGG_SYSCALL_F_TRACE_EXIT)
-        enabled_phases |= YGG_SYSCALL_CAPTURE_PHASE_EXIT;
-
-    for (uint8_t i = 0; i < schema->capture_count; ++i) {
-        const syscall_capture_template &source = schema->captures[i];
-        if (!(source.phase_mask & enabled_phases) ||
-            request->capture_count >= YGG_SYSCALL_CAPTURE_COUNT_MAX) {
-            continue;
-        }
-        ygg_syscall_capture_desc &dest =
-                request->captures[request->capture_count++];
-        dest.arg_index = source.arg_index;
-        dest.phase_mask = source.phase_mask & enabled_phases;
-        dest.kind = source.kind;
-        dest.length_source = source.length_source;
-        dest.length_arg = source.length_arg;
-        dest.pointer_source = YGG_SYSCALL_CAPTURE_POINTER_EFFECTIVE;
-        dest.flags = source.flags;
-        dest.schema_id = source.schema_id;
-        dest.fixed_length = source.fixed_length;
-        dest.max_length = std::min(source.max_length,
-                                   YGG_SYSCALL_CAPTURE_PAYLOAD_MAX);
-    }
-    if (request->capture_count > 0)
-        request->capture_total_limit = YGG_SYSCALL_CAPTURE_PAYLOAD_MAX;
-}
+/* The capture schema table and its descriptor builder come from the KPM's
+ * shared header, so the Manager auto-captures exactly the arguments the
+ * module's own userspace helper and self-test cover. */
 
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
     g_jvm = vm;
@@ -210,8 +90,8 @@ extern "C" JNIEXPORT jintArray JNICALL
 Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallCaptureSupportedNumbers(
         JNIEnv *env, jobject) {
     std::vector<jint> numbers;
-    numbers.reserve(sizeof(kArm64SyscallSchemas) / sizeof(kArm64SyscallSchemas[0]));
-    for (const auto &schema : kArm64SyscallSchemas) {
+    numbers.reserve(sizeof(arm64_syscall_schemas) / sizeof(arm64_syscall_schemas[0]));
+    for (const auto &schema : arm64_syscall_schemas) {
         numbers.push_back(static_cast<jint>(schema.nr));
     }
 
@@ -418,7 +298,17 @@ static jint syscall_configure_impl(
             }
             req.backtrace_stack_size = (uint32_t)backtrace_stack_size;
         }
-        populate_auto_capture_descriptors(req.syscall_nr, req.flags, &req);
+        const int capture_status = populate_auto_capture_descriptors(
+                req.syscall_nr, req.flags,
+                YGG_SYSCALL_CAPTURE_PAYLOAD_MAX, &req);
+        if (capture_status != 0) {
+            // Either the syscall has no schema, or the selected phases enable
+            // none of its captures. The rule is still a valid numeric
+            // observation, but the module rejects a non-zero limit paired with
+            // zero descriptors, so drop the capture request entirely.
+            req.capture_count = 0;
+            req.capture_total_limit = 0;
+        }
     } else {
         if (request_flags & ~selector_flags) {
             return -EINVAL;
@@ -513,7 +403,7 @@ static bool is_valid_syscall_event(
             (capture.kind != YGG_SYSCALL_CAPTURE_CSTRING &&
              capture.kind != YGG_SYSCALL_CAPTURE_BYTES &&
              capture.kind != YGG_SYSCALL_CAPTURE_STRUCT) ||
-            capture.schema_id > YGG_SYSCALL_SCHEMA_SOCKADDR ||
+            capture.schema_id > YGG_SYSCALL_SCHEMA_STAT ||
             (capture.schema_id != YGG_SYSCALL_SCHEMA_NONE &&
              capture.kind != YGG_SYSCALL_CAPTURE_STRUCT) ||
             capture.phase != event->phase ||
