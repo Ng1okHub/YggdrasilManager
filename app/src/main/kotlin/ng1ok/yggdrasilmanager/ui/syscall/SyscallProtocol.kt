@@ -15,6 +15,7 @@ import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
 import ng1ok.yggdrasilmanager.data.model.Arm64SyscallCatalog
+import ng1ok.yggdrasilmanager.data.model.Arm64SyscallEntry
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
 import ng1ok.yggdrasilmanager.data.model.SyscallBacktrace
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerStatus
@@ -139,7 +140,7 @@ private fun JsonObject.requiredPhase(name: String): SyscallTracePhase = when (
 internal fun encodeSyscallState(
     rules: List<SyscallObserveRule>,
     listenerStatus: SyscallListenerStatus = SyscallListenerStatus(),
-    supportedSyscalls: List<Int> = emptyList(),
+    catalog: List<Arm64SyscallEntry> = emptyList(),
     backtraceMode: String = SyscallBacktrace.MODE_FP,
 ): String = buildJsonObject {
     put("type", "state")
@@ -148,18 +149,16 @@ internal fun encodeSyscallState(
         put("state", listenerStatus.state.wireName)
         put("error", listenerStatus.error?.let(::JsonPrimitive) ?: JsonNull)
     })
-    put("supportedSyscalls", buildJsonArray {
-        supportedSyscalls
-            .asSequence()
-            .filter { it in 0 until 460 }
-            .distinct()
-            .sorted()
-            .forEach { syscallNr ->
-                add(buildJsonObject {
-                    put("nr", syscallNr)
-                    put("name", Arm64SyscallCatalog.nameFor(syscallNr))
-                })
-            }
+    put("syscallCatalog", buildJsonArray {
+        catalog.forEach { entry ->
+            add(buildJsonObject {
+                put("nr", entry.nr)
+                put("name", entry.name)
+                put("availability", entry.availability.wireName)
+                put("schema", entry.hasArgumentSchema)
+                put("enterOnly", entry.enterOnly)
+            })
+        }
     })
     put("rules", buildJsonArray {
         rules.forEach { rule ->

@@ -9,6 +9,9 @@ import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
+import ng1ok.yggdrasilmanager.data.model.Arm64SyscallEntry
+import ng1ok.yggdrasilmanager.data.model.Arm64SyscallCatalog
+import ng1ok.yggdrasilmanager.data.model.SyscallAvailability
 import ng1ok.yggdrasilmanager.data.model.SyscallCapture
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerState
@@ -204,7 +207,13 @@ class SyscallProtocolTest {
                     state = SyscallListenerState.FAILED,
                     error = "系統呼叫監聽器已停止（errno 32）",
                 ),
-                supportedSyscalls = listOf(64, 56, 64, -1, 460),
+                catalog = listOf(
+                    Arm64SyscallEntry(56, "openat", SyscallAvailability.AVAILABLE, hasArgumentSchema = true, enterOnly = false),
+                    Arm64SyscallEntry(63, "read", SyscallAvailability.AVAILABLE, hasArgumentSchema = true, enterOnly = false),
+                    Arm64SyscallEntry(180, "mq_open", SyscallAvailability.KERNEL_DISABLED, hasArgumentSchema = false, enterOnly = false),
+                    Arm64SyscallEntry(245, "(reserved)", SyscallAvailability.ARCH_UNSUPPORTED, hasArgumentSchema = false, enterOnly = false),
+                    Arm64SyscallEntry(93, "exit", SyscallAvailability.AVAILABLE, hasArgumentSchema = false, enterOnly = true),
+                ),
             ),
         ).jsonObject
         val global = state.getValue("rules").jsonArray[0].jsonObject
@@ -215,14 +224,26 @@ class SyscallProtocolTest {
         assertEquals("global", global.getValue("scope").jsonPrimitive.content)
         assertEquals(0L, global.getValue("targetId").jsonPrimitive.long)
         assertEquals("both", global.getValue("phase").jsonPrimitive.content)
-        val supportedSyscalls = state.getValue("supportedSyscalls").jsonArray.map { it.jsonObject }
+        val catalog = state.getValue("syscallCatalog").jsonArray.map { it.jsonObject }
         assertEquals(
-            listOf(56, 64),
-            supportedSyscalls.map { it.getValue("nr").jsonPrimitive.int },
+            listOf(56, 63, 180, 245, 93),
+            catalog.map { it.getValue("nr").jsonPrimitive.int },
         )
         assertEquals(
-            listOf("openat", "write"),
-            supportedSyscalls.map { it.getValue("name").jsonPrimitive.content },
+            listOf("openat", "read", "mq_open", "(reserved)", "exit"),
+            catalog.map { it.getValue("name").jsonPrimitive.content },
+        )
+        assertEquals(
+            listOf("available", "available", "kernel_disabled", "arch_unsupported", "available"),
+            catalog.map { it.getValue("availability").jsonPrimitive.content },
+        )
+        assertEquals(
+            listOf(true, true, false, false, false),
+            catalog.map { it.getValue("schema").jsonPrimitive.boolean },
+        )
+        assertEquals(
+            listOf(false, false, false, false, true),
+            catalog.map { it.getValue("enterOnly").jsonPrimitive.boolean },
         )
         val listener = state.getValue("listener").jsonObject
         assertEquals("failed", listener.getValue("state").jsonPrimitive.content)

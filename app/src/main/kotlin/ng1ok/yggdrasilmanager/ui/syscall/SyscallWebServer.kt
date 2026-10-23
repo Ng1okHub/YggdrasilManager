@@ -54,6 +54,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.concurrent.withLock
 import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
+import ng1ok.yggdrasilmanager.data.model.Arm64SyscallEntry
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
 import ng1ok.yggdrasilmanager.data.model.SyscallBacktrace
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerStatus
@@ -71,7 +72,7 @@ internal data class SyscallServerBindings(
     val events: Flow<SyscallEvent>,
     val rules: () -> List<SyscallObserveRule>,
     val listenerStatus: StateFlow<SyscallListenerStatus>,
-    val supportedSyscalls: List<Int>,
+    val catalog: List<Arm64SyscallEntry>,
     val installedApps: suspend () -> Result<List<InstalledApp>>,
     val observe: suspend (SyscallObserveRule) -> Result<Unit>,
     val unobserve: suspend (SyscallObserveRule) -> Result<Unit>,
@@ -201,7 +202,7 @@ internal fun Application.installSyscallWebRoutes(
                 encodeSyscallState(
                     bindings.rules(),
                     listenerStatus,
-                    bindings.supportedSyscalls,
+                    bindings.catalog,
                     bindings.backtraceMode(),
                 ),
             )
@@ -238,7 +239,7 @@ internal fun Application.installSyscallWebRoutes(
                 encodeSyscallState(
                     bindings.rules(),
                     bindings.listenerStatus.value,
-                    bindings.supportedSyscalls,
+                    bindings.catalog,
                     bindings.backtraceMode(),
                 ),
             )
@@ -264,7 +265,7 @@ internal fun Application.installSyscallWebRoutes(
                             encodeSyscallState(
                                 bindings.rules(),
                                 bindings.listenerStatus.value,
-                                bindings.supportedSyscalls,
+                                bindings.catalog,
                                 bindings.backtraceMode(),
                             ),
                         )
@@ -400,7 +401,7 @@ internal class SyscallWebServer(
             encodeSyscallState(
                 bindings.rules(),
                 bindings.listenerStatus.value,
-                bindings.supportedSyscalls,
+                bindings.catalog,
                 bindings.backtraceMode(),
             ),
         )

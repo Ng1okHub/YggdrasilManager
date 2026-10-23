@@ -24,6 +24,7 @@ import kotlin.concurrent.withLock
 import ng1ok.yggdrasilmanager.App
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
 import ng1ok.yggdrasilmanager.data.hidedbg.InstalledAppsSource
+import ng1ok.yggdrasilmanager.data.model.Arm64SyscallCatalog
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerState
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
 import ng1ok.yggdrasilmanager.data.model.SyscallBacktrace
@@ -57,15 +58,15 @@ class SyscallViewModel internal constructor(
     val uiState: StateFlow<SyscallUiState>
 
     init {
-        // Backtrace capture is independent from the optional automatic capture
-        // schemas, so the selector must expose every Arm64 syscall number.
-        val supportedSyscalls = (0 until 460).toList()
+        // The picker offers arm64's 1..291 range. Availability and the
+        // auto-argument-parsing flag ride along so the browser can label rows.
+        val catalog = Arm64SyscallCatalog.entries(captureSchemaNumbers())
         server = serverFactory.create(
             SyscallServerBindings(
                 events = repo.syscallEvents.map(::enrichEvent).flowOn(Dispatchers.IO),
                 rules = { rules.value },
                 listenerStatus = repo.syscallListenerStatus,
-                supportedSyscalls = supportedSyscalls,
+                catalog = catalog,
                 installedApps = {
                     installedAppsSource.load().map { apps ->
                         apps.filterNot { app -> app.uid == Process.myUid() }
@@ -162,6 +163,14 @@ class SyscallViewModel internal constructor(
         _backtraceMode.value = SyscallBacktrace.normalizeMode(mode)
         return Result.success(Unit)
     }
+
+    /**
+     * Syscall numbers the KPM renders with symbolic arguments. The schema table
+     * is compiled into the native library, so this never changes at runtime.
+     */
+    private fun captureSchemaNumbers(): Set<Int> =
+        runCatching { repo.nativeApi.syscallCaptureSupportedNumbers().toSet() }
+            .getOrDefault(emptySet())
 
     private fun enrichEvent(event: SyscallEvent): SyscallEvent {
         val snapshot = event.backtrace ?: return event

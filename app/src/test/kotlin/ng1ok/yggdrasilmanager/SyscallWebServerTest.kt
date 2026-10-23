@@ -26,6 +26,8 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.long
 import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
+import ng1ok.yggdrasilmanager.data.model.Arm64SyscallEntry
+import ng1ok.yggdrasilmanager.data.model.SyscallAvailability
 import ng1ok.yggdrasilmanager.data.model.SyscallEvent
 import ng1ok.yggdrasilmanager.data.model.SyscallListenerStatus
 import ng1ok.yggdrasilmanager.data.model.SyscallObserveRule
@@ -151,7 +153,10 @@ class SyscallWebServerTest {
             installSyscallWebRoutes(
                 bindings = emptyBindings(
                     rules = { listOf(rule) },
-                    supportedSyscalls = listOf(64, 56),
+                    catalog = listOf(
+                        Arm64SyscallEntry(64, "write", SyscallAvailability.AVAILABLE, hasArgumentSchema = true, enterOnly = false),
+                        Arm64SyscallEntry(56, "openat", SyscallAvailability.AVAILABLE, hasArgumentSchema = true, enterOnly = false),
+                    ),
                 ),
                 assetLoader = { null },
                 hub = SyscallClientHub(),
@@ -167,15 +172,20 @@ class SyscallWebServerTest {
         assertEquals("uid", encodedRule.getValue("scope").jsonPrimitive.content)
         assertEquals(SyscallObserveRule.MAX_UID, encodedRule.getValue("targetId").jsonPrimitive.long)
         assertEquals("both", encodedRule.getValue("phase").jsonPrimitive.content)
-        val supportedSyscalls = state.getValue("supportedSyscalls").jsonArray.map { it.jsonObject }
+        val catalog = state.getValue("syscallCatalog").jsonArray.map { it.jsonObject }
         assertEquals(
-            listOf(56, 64),
-            supportedSyscalls.map { it.getValue("nr").jsonPrimitive.int },
+            listOf(64, 56),
+            catalog.map { it.getValue("nr").jsonPrimitive.int },
         )
         assertEquals(
-            listOf("openat", "write"),
-            supportedSyscalls.map { it.getValue("name").jsonPrimitive.content },
+            listOf("write", "openat"),
+            catalog.map { it.getValue("name").jsonPrimitive.content },
         )
+        assertEquals(
+            listOf("available", "available"),
+            catalog.map { it.getValue("availability").jsonPrimitive.content },
+        )
+        assertTrue(catalog.all { it.getValue("schema").jsonPrimitive.boolean })
 
         session.close(CloseReason(CloseReason.Codes.NORMAL, "done"))
     }
@@ -299,7 +309,7 @@ class SyscallWebServerTest {
         events: Flow<SyscallEvent> = emptyFlow(),
         rules: () -> List<SyscallObserveRule> = { emptyList() },
         listenerStatus: StateFlow<SyscallListenerStatus> = MutableStateFlow(SyscallListenerStatus()),
-        supportedSyscalls: List<Int> = emptyList(),
+        catalog: List<Arm64SyscallEntry> = emptyList(),
         installedApps: suspend () -> Result<List<InstalledApp>> = { Result.success(emptyList()) },
         observe: suspend (SyscallObserveRule) -> Result<Unit> = { Result.success(Unit) },
         unobserve: suspend (SyscallObserveRule) -> Result<Unit> = { Result.success(Unit) },
@@ -308,7 +318,7 @@ class SyscallWebServerTest {
         events = events,
         rules = rules,
         listenerStatus = listenerStatus,
-        supportedSyscalls = supportedSyscalls,
+        catalog = catalog,
         installedApps = installedApps,
         observe = observe,
         unobserve = unobserve,
