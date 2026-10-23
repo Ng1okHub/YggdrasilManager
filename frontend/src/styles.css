@@ -603,6 +603,133 @@ select {
   text-align: center;
 }
 
+/* ── Syscall picker ─────────────────────────────────────────────────── */
+.syscall-target {
+  display: grid;
+  gap: 6px;
+}
+
+.syscall-options {
+  max-height: min(420px, 58vh);
+}
+
+.syscall-option {
+  min-height: 38px;
+  padding: 6px 8px;
+}
+
+.syscall-option-primary {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.syscall-nr {
+  flex: none;
+  min-width: 42px;
+  color: var(--faint);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.syscall-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 650;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.syscall-tag {
+  flex: none;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  padding: 2px 7px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+
+/* Symbolic argument rendering is the reason to prefer one syscall over another. */
+.syscall-tag--schema {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--line));
+  background: var(--accent-soft);
+}
+
+.syscall-tag--enter {
+  color: var(--info);
+  border-color: color-mix(in srgb, var(--info) 40%, var(--line));
+  background: var(--info-soft);
+}
+
+.syscall-tag--unavailable {
+  color: var(--muted);
+  border-style: dashed;
+}
+
+.syscall-option--unavailable {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.syscall-option--unavailable .syscall-name {
+  font-weight: 500;
+  text-decoration: line-through;
+  text-decoration-color: var(--line-strong);
+}
+
+/* Unavailable rows are listed for context, never highlighted. */
+.syscall-option--unavailable:hover,
+.syscall-option--unavailable.package-option--active {
+  border-color: transparent;
+  background: none;
+}
+
+.syscall-hint {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 16px;
+  margin: -2px 0 0;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.syscall-hint-count {
+  flex: none;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 2px 8px;
+  background: var(--surface-2);
+  font-family: var(--mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.syscall-hint-selected {
+  color: var(--accent);
+  font-family: var(--mono);
+}
+
+/* exit / exit_group never return, so only the enter phase is offered. */
+.segmented-option--blocked {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+.segmented-option--blocked:hover {
+  color: var(--muted);
+}
+
 .package-feedback {
   display: flex;
   min-height: 24px;

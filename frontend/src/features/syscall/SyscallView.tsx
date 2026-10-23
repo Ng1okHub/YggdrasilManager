@@ -13,7 +13,6 @@ import {
   initialSyscallState,
   normalizeBacktraceMode,
   normalizeInstalledApps,
-  normalizeSupportedSyscalls,
   reduceSyscall,
   selectedPackageUid,
   selectSyscall,
@@ -24,10 +23,12 @@ import {
   type BacktraceMode,
   type InstalledApp,
   type Scope,
+  type SyscallCatalogEntry,
   type SyscallEvent,
   type SyscallRule,
   type SyscallState,
 } from "./model";
+import { SyscallPicker } from "./SyscallPicker";
 
 type Action =
   | { kind: "message"; message: Record<string, unknown> }
@@ -59,7 +60,11 @@ export function SyscallView() {
   const [backtraceMode, setBacktraceMode] = useState<BacktraceMode>("fp");
   const [apps, setApps] = useState<InstalledApp[]>([]);
   const [status, setStatus] = useState("");
+  const [selectedEntry, setSelectedEntry] = useState<SyscallCatalogEntry | null>(null);
   const clientRef = useRef<WebSocketClient | null>(null);
+  const catalog = state.catalog;
+  const observed = useMemo(() => observedSyscallsFromRules(state.rules), [state.rules]);
+  const events = filterSyscallEvents(state);
 
   useEffect(() => {
     const client = new WebSocketClient("/ws", {
@@ -80,6 +85,14 @@ export function SyscallView() {
       .catch((error: unknown) => dispatch({ kind: "error", message: error instanceof Error ? error.message : "App 清單讀取失敗" }));
   }, [scope]);
 
+  // Seed the picker with the first usable syscall once the server sends its catalog.
+  useEffect(() => {
+    setSelectedEntry((current) => {
+      if (current && catalog.some((entry) => entry.nr === current.nr)) return current;
+      return catalog.find((entry) => entry.availability === "available") ?? null;
+    });
+  }, [catalog]);
+
   const send = (command: Record<string, unknown>, success = "指令已送出") => {
     if (!clientRef.current?.send(command)) setStatus("WebSocket 尚未連線");
     else setStatus(success);
@@ -89,13 +102,9 @@ export function SyscallView() {
     event.preventDefault();
     try {
       const resolvedTarget = scope === "uid" && packageName ? selectedPackageUid(apps, packageName) : targetId;
-      send(createSyscallObserveCommand({ syscallNr: (document.getElementById("syscall-nr") as HTMLSelectElement)?.value, scope, targetId: resolvedTarget, phase, captureBacktrace, backtraceStackSize }), "觀察規則已新增");
+      send(createSyscallObserveCommand({ syscallNr: selectedEntry?.nr, scope, targetId: resolvedTarget, phase, captureBacktrace, backtraceStackSize }), "觀察規則已新增");
     } catch (error) { dispatch({ kind: "error", message: error instanceof Error ? error.message : "規則無效" }); }
   };
-
-  const observed = useMemo(() => observedSyscallsFromRules(state.rules), [state.rules]);
-  const events = filterSyscallEvents(state);
-  const catalog = state.supportedSyscalls.length ? state.supportedSyscalls : observed;
 
   return (
     <div className="app-root">
@@ -106,10 +115,10 @@ export function SyscallView() {
           <section className="rule-editor">
             <SectionHeading title="新增觀察規則" count={state.rules.length} />
             <form className={`syscall-rule-form syscall-rule-form--${scope}`} onSubmit={submit as unknown as JSX.GenericEventHandler<HTMLFormElement>}>
-              <Field label="Syscall"><select id="syscall-nr" required disabled={!catalog.length}>{catalog.map((entry) => <option key={entry.nr} value={entry.nr}>{entry.nr} · {entry.name}</option>)}</select></Field>
+              <SyscallPicker entries={catalog} selected={selectedEntry?.nr ?? null} disabled={!catalog.length} onSelect={(entry) => { setSelectedEntry(entry); setPhase(entry.enterOnly && phase !== "enter" ? "enter" : phase); }} />
               <Field label="範圍"><select value={scope} onChange={(e) => setScope((e.currentTarget as HTMLSelectElement).value as Scope)}><option value="tgid">Process (TGID)</option><option value="tid">Thread (TID)</option><option value="uid">App (UID)</option></select></Field>
               {scope === "uid" ? <PackagePicker apps={apps} selected={packageName} query={packageQuery} open={packageMenuOpen} disabled={!apps.length} onFocus={() => setPackageMenuOpen(true)} onClose={() => setPackageMenuOpen(false)} onQuery={(value) => { setPackageQuery(value); setPackageName(""); setPackageMenuOpen(true); }} onSelect={(app) => { setPackageName(app.packageName); setPackageQuery(app.packageName); setPackageMenuOpen(false); }} /> : <Field label={scope === "tid" ? "Thread ID" : "Process ID"}><input type="number" min="1" value={targetId} onInput={(e) => setTargetId((e.currentTarget as HTMLInputElement).value)} required /></Field>}
-              <fieldset className="phase-field"><legend>觀察階段</legend><div className="segmented-control">{(["enter", "exit", "both"] as const).map((item) => <label key={item}><input type="radio" checked={phase === item} onChange={() => setPhase(item)} /><span>{item}</span></label>)}</div></fieldset>
+              <fieldset className="phase-field"><legend>觀察階段</legend><div className="segmented-control">{(["enter", "exit", "both"] as const).map((item) => { const blocked = Boolean(selectedEntry?.enterOnly) && item !== "enter"; return <label key={item} className={blocked ? "segmented-option--blocked" : ""} title={blocked ? "exit / exit_group 不返回，僅能觀察進入階段" : undefined}><input type="radio" checked={phase === item} disabled={blocked} onChange={() => setPhase(item)} /><span>{item}</span></label>; })}</div></fieldset>
               <fieldset className="backtrace-field"><legend>Backtrace</legend><label className="backtrace-toggle"><input type="checkbox" checked={captureBacktrace} onChange={(e) => setCaptureBacktrace((e.currentTarget as HTMLInputElement).checked)} /><span>Capture user stack</span></label>{captureBacktrace && <Field label="Stack snapshot size"><input type="number" min="0" max="65536" step="8" value={backtraceStackSize} onInput={(e) => setBacktraceStackSize((e.currentTarget as HTMLInputElement).value)} /></Field>}<Field label="Unwind mode"><select value={backtraceMode} onChange={(e) => { const mode = normalizeBacktraceMode((e.currentTarget as HTMLSelectElement).value); setBacktraceMode(mode); send(createSyscallConfigCommand(mode), "Backtrace 模式已更新"); }}><option value="fp">Frame pointer (FP)</option><option value="dwarf">DWARF (libunwindstack)</option></select></Field></fieldset>
               <div className="form-actions"><Button type="submit" variant="primary">新增規則</Button></div>
             </form>
