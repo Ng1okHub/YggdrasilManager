@@ -31,12 +31,6 @@ interface SelfTestRunner {
         onStatuses: (Map<String, SelfTestStatus>) -> Unit = {},
     ): SelfTestRunOutcome
 
-    /**
-     * Deploys the binary and runs its non-destructive `--probe` mode, which
-     * only reports module availability and version without touching state.
-     */
-    suspend fun probe(onLine: (String, SelfTestLogKind) -> Unit): SelfTestRunOutcome
-
     fun requestCancel()
 }
 
@@ -187,65 +181,6 @@ class YggdrasilSelfTestRunner(context: Context) : SelfTestRunner {
         )
     }
 
-    override suspend fun probe(
-        onLine: (String, SelfTestLogKind) -> Unit,
-    ): SelfTestRunOutcome = withContext(Dispatchers.IO) {
-        val startedAt = SystemClock.elapsedRealtime()
-        if (!supported) {
-            return@withContext failure(
-                "此裝置架構不受支援：模組自測程式僅提供 arm64-v8a。",
-                startedAt,
-            )
-        }
-
-        val shell = try {
-            rootShell()
-        } catch (e: Exception) {
-            return@withContext failure("無法啟動 Root Shell：${e.message}", startedAt)
-        }
-        if (!shell.isRoot) {
-            return@withContext failure("需要 Root 權限才能執行模組自測。", startedAt)
-        }
-
-        val suPath = resolveSuPath(shell)
-        cancelRequested = false
-        try {
-            deploy(shell, suPath)
-        } catch (e: Exception) {
-            return@withContext failure("無法部署自測程式：${e.message}", startedAt)
-        }
-
-        val parser = SelfTestOutputParser()
-        val exit = try {
-            runSection(suPath, PROBE_FILTER, parser, onLine) { }
-        } catch (e: IOException) {
-            if (cancelRequested) {
-                return@withContext SelfTestRunOutcome(
-                    exitCode = -1,
-                    checks = 0,
-                    failed = 0,
-                    statuses = emptyMap(),
-                    cancelled = true,
-                    durationMs = SystemClock.elapsedRealtime() - startedAt,
-                    probe = true,
-                )
-            }
-            return@withContext failure("無法執行自測程式：${e.message}", startedAt)
-        }
-        parser.finish()
-
-        SelfTestRunOutcome(
-            exitCode = if (cancelRequested) -1 else exit,
-            checks = parser.checks,
-            failed = parser.failed,
-            statuses = emptyMap(),
-            fatal = parser.fatal,
-            cancelled = cancelRequested,
-            durationMs = SystemClock.elapsedRealtime() - startedAt,
-            probe = true,
-        )
-    }
-
     override fun requestCancel() {
         cancelRequested = true
         activeProcess?.destroyForcibly()
@@ -387,7 +322,6 @@ class YggdrasilSelfTestRunner(context: Context) : SelfTestRunner {
         const val ASSET_PATH = "yggdrasil_test/arm64-v8a/yggdrasil_test"
         const val DEVICE_PATH = "/data/local/tmp/yggdrasil_test"
         const val CLEANUP_FILTER = "__yggmanager_cleanup__"
-        const val PROBE_FILTER = "--probe"
         const val SHELL_TIMEOUT_MS = 15_000L
         const val DEPLOY_TIMEOUT_SECONDS = 10L
     }

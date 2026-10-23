@@ -33,7 +33,6 @@ import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.DeleteOutline
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Lock
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
@@ -125,7 +124,6 @@ fun SelfTestScreen(vm: SelfTestViewModel = viewModel(factory = SelfTestViewModel
             ) {
                 EnvironmentPanel(
                     state = state,
-                    onProbe = vm::probe,
                     onRefresh = { vm.refreshEnvironment(force = true) },
                 )
                 Spacer(modifier = Modifier.size(10.dp))
@@ -172,7 +170,6 @@ fun SelfTestScreen(vm: SelfTestViewModel = viewModel(factory = SelfTestViewModel
 @Composable
 private fun EnvironmentPanel(
     state: SelfTestUiState,
-    onProbe: () -> Unit,
     onRefresh: () -> Unit,
 ) {
     Surface(
@@ -214,15 +211,6 @@ private fun EnvironmentPanel(
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                }
-                TextButton(onClick = onProbe, enabled = !state.running) {
-                    Icon(
-                        imageVector = Icons.Default.PlayArrow,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp),
-                    )
-                    Spacer(modifier = Modifier.size(2.dp))
-                    Text("探測")
                 }
                 IconButton(onClick = onRefresh, enabled = !state.running) {
                     Icon(
@@ -683,13 +671,6 @@ private fun summaryText(state: SelfTestUiState): String {
     }
     if (outcome.fatal != null) return "模組不可用"
     val duration = String.format(Locale.ROOT, "%.1f 秒", outcome.durationMs / 1000.0)
-    if (outcome.probe) {
-        return if (outcome.exitCode == 0) {
-            "探測成功：模組可用 · $duration"
-        } else {
-            "探測失敗（退出碼 ${outcome.exitCode}）"
-        }
-    }
     return when {
         outcome.failed > 0 -> "${outcome.checks} 項檢查，${outcome.failed} 項失敗 · $duration"
         outcome.checks == 0 -> "沒有執行任何檢查 · $duration"

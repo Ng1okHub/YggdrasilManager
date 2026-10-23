@@ -140,59 +140,6 @@ class SelfTestViewModel(
 
     fun runSelected() = runFeatures(_uiState.value.selectedFeatures)
 
-    /** Deploys the binary and runs its non-destructive availability probe. */
-    fun probe() {
-        val state = _uiState.value
-        if (state.running) return
-        when {
-            !state.supported -> {
-                _uiState.update { it.copy(message = "此裝置架構不受支援（需要 arm64-v8a）。") }
-                return
-            }
-            state.rootState != SelfTestRootState.GRANTED -> {
-                _uiState.update { it.copy(message = "需要 Root 權限才能執行模組自測。") }
-                return
-            }
-        }
-
-        viewModelScope.launch {
-            _uiState.update {
-                it.copy(
-                    running = true,
-                    stopping = false,
-                    log = emptyList(),
-                    outcome = null,
-                    message = null,
-                    statuses = emptyMap(),
-                )
-            }
-
-            val outcome = try {
-                runner.probe(::appendLine)
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (failure: Exception) {
-                SelfTestRunOutcome(
-                    exitCode = -1,
-                    checks = 0,
-                    failed = 0,
-                    statuses = emptyMap(),
-                    error = failure.message ?: "模組探測失敗",
-                    probe = true,
-                )
-            }
-
-            _uiState.update {
-                it.copy(
-                    running = false,
-                    stopping = false,
-                    outcome = outcome,
-                    message = outcome.error ?: outcome.fatal,
-                )
-            }
-        }
-    }
-
     fun stop() {
         if (!_uiState.value.running) return
         _uiState.update { it.copy(stopping = true) }

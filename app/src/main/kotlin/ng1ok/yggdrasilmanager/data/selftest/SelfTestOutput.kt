@@ -44,8 +44,6 @@ data class SelfTestRunOutcome(
     val cancelled: Boolean = false,
     val error: String? = null,
     val durationMs: Long = 0L,
-    /** True when this outcome came from the non-destructive --probe run. */
-    val probe: Boolean = false,
 ) {
     val success: Boolean
         get() = error == null && !cancelled && fatal == null && failed == 0 && exitCode == 0
