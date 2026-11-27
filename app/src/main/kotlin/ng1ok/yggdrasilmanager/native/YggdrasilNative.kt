@@ -10,7 +10,44 @@ interface YggdrasilNativeApi {
     fun hwbpUnobserve(pid: Int, targetAddr: Long): Int
     fun hwbpStartListen(callback: HwbpEventCallback)
     fun hwbpStopListen()
+    fun syscallConfigure(op: Int, flags: Int, syscallNr: Int, targetId: Long): Int
+    fun syscallConfigureWithBacktrace(
+        op: Int,
+        flags: Int,
+        syscallNr: Int,
+        targetId: Long,
+        backtraceStackSize: Int,
+    ): Int = syscallConfigure(op, flags, syscallNr, targetId)
+    fun syscallCaptureSupportedNumbers(): IntArray
+    fun syscallStartListen(callback: SyscallEventCallback): Int
+    fun syscallStopListen()
     fun hideDbg(enable: Boolean, hasUid: Boolean, uid: Int): Int
+    fun mapsAddRule(
+        hasPid: Boolean,
+        pid: Int,
+        action: Int,
+        matchKind: Int,
+        ruleFlags: Int,
+        matchPerms: String,
+        setPerms: String,
+        addrStart: Long,
+        addrEnd: Long,
+        pattern: String,
+    ): Int = -38
+    fun mapsRemoveRule(
+        hasPid: Boolean,
+        pid: Int,
+        action: Int,
+        matchKind: Int,
+        ruleFlags: Int,
+        matchPerms: String,
+        setPerms: String,
+        addrStart: Long,
+        addrEnd: Long,
+        pattern: String,
+    ): Int = -38
+    fun mapsClear(hasPid: Boolean, pid: Int, allScopes: Boolean): Int = -38
+    fun mapsGet(hasPid: Boolean, pid: Int): ByteArray? = null
     fun hwbpUnwindDwarf(
         pid: Int,
         flags: Int,
@@ -52,6 +89,51 @@ interface HwbpEventCallback {
     )
 }
 
+interface SyscallEventCallback {
+    /** Called by the process that owns the native reader once it is ready. */
+    fun onListenerStarted() = Unit
+
+    /** Records events dropped by a forwarding queue before the next callback. */
+    fun onRelayDropped(count: Long) = Unit
+
+    fun onEvent(
+        seq: Long,
+        dropped: Long,
+        callId: Long,
+        phase: Int,
+        tid: Int,
+        tgid: Int,
+        syscallNr: Int,
+        eventFlags: Int,
+        ruleFlags: Int,
+        targetId: Long,
+        comm: String,
+        userCookie: Long,
+        argMask: Long,
+        argsBefore: LongArray,
+        argsAfter: LongArray,
+        returnBefore: Long,
+        returnAfter: Long,
+        captureCount: Int,
+        capturePayload: ByteArray,
+        backtraceFlags: Int = 0,
+        backtraceSeq: Long = 0L,
+        backtraceDropped: Long = 0L,
+        backtraceCallId: Long = 0L,
+        backtracePhase: Int = 0,
+        backtraceTid: Int = 0,
+        backtraceTgid: Int = 0,
+        backtraceSyscallNr: Int = 0,
+        backtraceStackRequestedSize: Int = 0,
+        backtraceStackCopiedSize: Int = 0,
+        backtraceStackAddr: Long = 0L,
+        backtraceRegs: LongArray = LongArray(0),
+        backtraceStack: ByteArray = ByteArray(0),
+    )
+
+    fun onListenerFailure(error: Int)
+}
+
 object YggdrasilNative : YggdrasilNativeApi {
     init {
         System.loadLibrary("yggdrasilmanager")
@@ -63,7 +145,44 @@ object YggdrasilNative : YggdrasilNativeApi {
     external override fun hwbpUnobserve(pid: Int, targetAddr: Long): Int
     external override fun hwbpStartListen(callback: HwbpEventCallback)
     external override fun hwbpStopListen()
+    external override fun syscallConfigure(op: Int, flags: Int, syscallNr: Int, targetId: Long): Int
+    external override fun syscallConfigureWithBacktrace(
+        op: Int,
+        flags: Int,
+        syscallNr: Int,
+        targetId: Long,
+        backtraceStackSize: Int,
+    ): Int
+    external override fun syscallCaptureSupportedNumbers(): IntArray
+    external override fun syscallStartListen(callback: SyscallEventCallback): Int
+    external override fun syscallStopListen()
     external override fun hideDbg(enable: Boolean, hasUid: Boolean, uid: Int): Int
+    external override fun mapsAddRule(
+        hasPid: Boolean,
+        pid: Int,
+        action: Int,
+        matchKind: Int,
+        ruleFlags: Int,
+        matchPerms: String,
+        setPerms: String,
+        addrStart: Long,
+        addrEnd: Long,
+        pattern: String,
+    ): Int
+    external override fun mapsRemoveRule(
+        hasPid: Boolean,
+        pid: Int,
+        action: Int,
+        matchKind: Int,
+        ruleFlags: Int,
+        matchPerms: String,
+        setPerms: String,
+        addrStart: Long,
+        addrEnd: Long,
+        pattern: String,
+    ): Int
+    external override fun mapsClear(hasPid: Boolean, pid: Int, allScopes: Boolean): Int
+    external override fun mapsGet(hasPid: Boolean, pid: Int): ByteArray?
 
     override fun hwbpUnwindDwarf(
         pid: Int,
@@ -113,6 +232,12 @@ object YggdrasilNative : YggdrasilNativeApi {
         nativeHwbpResolveLibraryTarget(pid, mapsText, library, offset)
     }
 
+    /** Return names of loaded shared objects, including SONAMEs for ELF files mapped from APKs. */
+    fun hwbpListLibraries(pid: Int, mapsText: String): Result<List<String>> = runCatching {
+        nativeHwbpListLibraries(pid, mapsText)?.toList()
+            ?: throw IllegalStateException("Failed to enumerate loaded libraries")
+    }
+
     private external fun nativeHwbpUnwindDwarf(
         pid: Int,
         flags: Int,
@@ -131,4 +256,6 @@ object YggdrasilNative : YggdrasilNativeApi {
         library: String,
         offset: Long,
     ): Long
+
+    private external fun nativeHwbpListLibraries(pid: Int, mapsText: String): Array<String>?
 }

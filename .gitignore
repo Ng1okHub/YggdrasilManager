@@ -16,3 +16,17 @@
 local.properties
 /.worktrees/
 app/src/main/cpp/third_party/**/cmake_install.cmake
+.agents
+/frontend/node_modules/
+/frontend/dist/
+
+.claude
+
+# Release signing credentials and local output must never be published.
+/keystore.properties
+/.signing/
+*.jks
+*.keystore
+*.p12
+/dist/
+/.kotlin/

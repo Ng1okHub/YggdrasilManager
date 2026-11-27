@@ -13,12 +13,14 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.FileProcMapsSource
 import ng1ok.yggdrasilmanager.data.model.HwbpBacktrace
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
+import ng1ok.yggdrasilmanager.data.model.ProcMaps
 import ng1ok.yggdrasilmanager.data.model.ProcMapsSource
 import ng1ok.yggdrasilmanager.native.YggdrasilNative
 
@@ -352,6 +354,50 @@ internal fun encodeAck(result: Result<Unit>): String = buildJsonObject {
     put("ok", result.isSuccess)
     put("error", result.exceptionOrNull()?.message?.let(::JsonPrimitive) ?: JsonNull)
 }.toString()
+
+/** Encode installed app metadata for the package dropdown as a JSON response. */
+internal fun encodeHwbpInstalledApps(apps: List<InstalledApp>): String = buildJsonObject {
+    put("apps", buildJsonArray {
+        apps.forEach { app ->
+            add(buildJsonObject {
+                put("packageName", app.packageName)
+                put("label", app.label)
+                put("uid", app.uid)
+                put("isSystem", app.isSystem)
+            })
+        }
+    })
+}.toString()
+
+/** Encode packaged or mapped shared-object names for library suggestions as a JSON response. */
+internal fun encodeHwbpLibraryNames(libraries: List<String>): String = buildJsonObject {
+    put("libraries", buildJsonArray {
+        libraries.forEach { library -> add(JsonPrimitive(library)) }
+    })
+}.toString()
+
+/** Encode an option-loading failure as a JSON response with a readable error. */
+internal fun encodeHwbpApiError(error: Throwable): String = buildJsonObject {
+    put(
+        "error",
+        error.message?.takeIf(String::isNotBlank) ?: "Unable to load HWBP target options",
+    )
+}.toString()
+
+/** Return unique shared-object basenames from a process maps snapshot, sorted by name. */
+internal fun extractHwbpLibraryNames(mapsText: String): List<String> =
+    ProcMaps.parse(mapsText)
+        .asSequence()
+        .map { entry -> entry.name.substringBefore(" (deleted)") }
+        // A maps file also contains APKs, fonts, and anonymous regions. Only shared objects
+        // are valid choices for the UI's library + offset workflow.
+        .filter { name ->
+            val marker = name.indexOf(".so")
+            marker >= 0 && (marker + 3 == name.length || name[marker + 3] == '.')
+        }
+        .distinct()
+        .sortedWith(String.CASE_INSENSITIVE_ORDER.thenBy { it })
+        .toList()
 
 private fun Long.toHexAddress(): String =
     "0x${java.lang.Long.toUnsignedString(this, 16)}"

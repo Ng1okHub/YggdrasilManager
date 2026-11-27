@@ -14,9 +14,14 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
 import ng1ok.yggdrasilmanager.native.HwbpEventCallback
+import ng1ok.yggdrasilmanager.native.SyscallEventCallback
 import ng1ok.yggdrasilmanager.native.YggdrasilNativeApi
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
+import ng1ok.yggdrasilmanager.data.model.SyscallListenerState
+import ng1ok.yggdrasilmanager.data.model.SyscallObserveRule
+import ng1ok.yggdrasilmanager.data.model.SyscallScope
+import ng1ok.yggdrasilmanager.data.model.SyscallTracePhase
 import org.junit.Assert.assertTrue
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertEquals
@@ -66,6 +71,155 @@ class RepositoryTest {
         val params = HwbpObserveParams(pid = 1234, targetAddr = 0x1000L, mode = 1, len = 4, flags = 0, stackSize = 4096)
         val result = repo.hwbpObserve(params)
         assertTrue(result.isFailure)
+    }
+
+    @Test
+    fun syscallRulesReflectOnlySuccessfulNativeMutations() = runTest {
+        val syscallRepo = YggdrasilRepository(
+            native = mockNative,
+            observerProcessId = { 7000 },
+            observerUid = { 10123 },
+            observerThreadIds = { setOf(7000) },
+        )
+        val rule = SyscallObserveRule(64, SyscallScope.TGID, 1234, SyscallTracePhase.BOTH)
+        val replacement = rule.copy(phase = SyscallTracePhase.ENTER)
+        every { mockNative.syscallConfigure(any(), any(), any(), any()) } returns 0
+
+        assertTrue(syscallRepo.setSyscallRule(rule).isSuccess)
+        assertEquals(listOf(rule), syscallRepo.syscallRules.value)
+        assertTrue(syscallRepo.setSyscallRule(replacement).isSuccess)
+        assertEquals(listOf(replacement), syscallRepo.syscallRules.value)
+
+        every { mockNative.syscallConfigure(any(), any(), any(), any()) } returns -1
+        assertTrue(syscallRepo.deleteSyscallRule(replacement).isFailure)
+        assertEquals(listOf(replacement), syscallRepo.syscallRules.value)
+
+        every { mockNative.syscallConfigure(any(), any(), any(), any()) } returns 0
+        assertTrue(syscallRepo.deleteSyscallRule(replacement).isSuccess)
+        assertTrue(syscallRepo.syscallRules.value.isEmpty())
+    }
+
+    @Test
+    fun syscallObservationRejectsEveryScopeThatCouldTraceTheManager() = runTest {
+        val safetyRepo = YggdrasilRepository(
+            native = mockNative,
+            observerProcessId = { 4200 },
+            observerUid = { 10123 },
+            observerThreadIds = { setOf(4200, 4201, 4202) },
+        )
+        val unsafeRules = listOf(
+            SyscallObserveRule(64, SyscallScope.GLOBAL, 0, SyscallTracePhase.ENTER),
+            SyscallObserveRule(64, SyscallScope.UID, 0, SyscallTracePhase.ENTER),
+            SyscallObserveRule(64, SyscallScope.UID, 10123, SyscallTracePhase.ENTER),
+            SyscallObserveRule(64, SyscallScope.TGID, 4200, SyscallTracePhase.ENTER),
+            SyscallObserveRule(64, SyscallScope.TID, 4201, SyscallTracePhase.ENTER),
+        )
+
+        unsafeRules.forEach { rule ->
+            assertTrue(safetyRepo.setSyscallRule(rule).isFailure)
+        }
+
+        verify(exactly = 0) { mockNative.syscallConfigure(any(), any(), any(), any()) }
+        assertTrue(safetyRepo.syscallRules.value.isEmpty())
+    }
+
+    @Test
+    fun syscallObservationForwardsTheFullUnsignedUidRange() = runTest {
+        val syscallRepo = YggdrasilRepository(
+            native = mockNative,
+            observerProcessId = { 7000 },
+            observerUid = { 10123 },
+            observerThreadIds = { setOf(7000) },
+        )
+        val rule = SyscallObserveRule(
+            64,
+            SyscallScope.UID,
+            SyscallObserveRule.MAX_UID,
+            SyscallTracePhase.ENTER,
+        )
+        every { mockNative.syscallConfigure(any(), any(), any(), any()) } returns 0
+
+        assertTrue(syscallRepo.setSyscallRule(rule).isSuccess)
+        verify {
+            mockNative.syscallConfigure(
+                SyscallObserveRule.OP_SET,
+                rule.configureFlags,
+                rule.syscallNr,
+                SyscallObserveRule.MAX_UID,
+            )
+        }
+    }
+
+    @Test
+    fun syscallListenerStartFailureIsPublished() {
+        every { mockNative.syscallStartListen(any()) } returns -95
+
+        repo.startSyscallEventStream()
+
+        assertEquals("系統呼叫監聽器已停止（errno 95）", repo.syscallListenerError.value)
+        assertEquals(SyscallListenerState.FAILED, repo.syscallListenerStatus.value.state)
+    }
+
+    @Test
+    fun syscallListenerRuntimeFailureIsPublished() {
+        val callback = slot<SyscallEventCallback>()
+        every { mockNative.syscallStartListen(capture(callback)) } returns 0
+
+        repo.startSyscallEventStream()
+        callback.captured.onListenerFailure(-108)
+
+        assertEquals("系統呼叫監聽器已停止（errno 108）", repo.syscallListenerError.value)
+        assertEquals(SyscallListenerState.FAILED, repo.syscallListenerStatus.value.state)
+    }
+
+    @Test
+    fun syscallListenerStartAndRestartPublishTheirHealth() {
+        every { mockNative.syscallStartListen(any()) } returns 0
+
+        repo.startSyscallEventStream()
+
+        assertEquals(SyscallListenerState.RUNNING, repo.syscallListenerStatus.value.state)
+        repo.restartSyscallEventStream()
+        assertEquals(SyscallListenerState.RUNNING, repo.syscallListenerStatus.value.state)
+        verify(exactly = 1) { mockNative.syscallStopListen() }
+        verify(exactly = 2) { mockNative.syscallStartListen(any()) }
+    }
+
+    @Test
+    fun syscallEventsRetainValidatedCapturePayload() = runTest {
+        val callback = slot<SyscallEventCallback>()
+        every { mockNative.syscallStartListen(capture(callback)) } returns 0
+        val payload = byteArrayOf(0x20, 0, 1, 1, 1, 2, 0, 0)
+        val expectedPayload = payload.copyOf()
+
+        repo.startSyscallEventStream()
+        callback.captured.onEvent(
+            seq = 1,
+            dropped = 0,
+            callId = 2,
+            phase = 1,
+            tid = 1234,
+            tgid = 1234,
+            syscallNr = 56,
+            eventFlags = 1 shl 3,
+            ruleFlags = 1 shl 1,
+            targetId = 1234,
+            comm = "target",
+            userCookie = 0,
+            argMask = 0,
+            argsBefore = LongArray(6),
+            argsAfter = LongArray(6),
+            returnBefore = 0,
+            returnAfter = 0,
+            captureCount = 1,
+            capturePayload = payload,
+        )
+        payload.fill(0)
+
+        val event = withTimeout(1_000) { repo.syscallEvents.take(1).toList().single() }
+
+        assertEquals(1, event.captureCount)
+        assertTrue(expectedPayload.contentEquals(event.capturePayload))
     }
 
     @Test

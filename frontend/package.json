@@ -1,0 +1,22 @@
+{
+  "name": "yggdrasil-observe-web",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "test": "node --experimental-strip-types --test test/*.test.mjs",
+    "sync:android": "npm run build && node scripts/sync-android.mjs",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "preact": "^10.26.4"
+  },
+  "devDependencies": {
+    "@preact/preset-vite": "^2.10.1",
+    "@types/node": "^22.13.10",
+    "typescript": "^5.8.2",
+    "vite": "^6.2.3"
+  }
+}

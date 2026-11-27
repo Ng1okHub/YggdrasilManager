@@ -23,12 +23,21 @@ import io.ktor.websocket.Frame
 import io.ktor.websocket.readText
 import io.ktor.websocket.send
 import java.io.IOException
+import java.net.BindException
 import java.net.Inet4Address
+import java.net.InetSocketAddress
 import java.net.NetworkInterface
+import java.net.ServerSocket
 import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.locks.ReentrantLock
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineExceptionHandler
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -38,6 +47,8 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlin.concurrent.withLock
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
@@ -45,11 +56,28 @@ import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
 
 internal const val HWBP_SERVER_PORT = 8765
 
+private const val PORT_RELEASE_ATTEMPTS = 20
+private const val PORT_RELEASE_RETRY_MILLIS = 100L
+private const val SERVER_STOP_TIMEOUT_MILLIS = 5_000L
+
+/*
+ * A destination creates a new ViewModel and server instance on every visit.
+ * CIO owns the listening socket outside that ViewModel, so transitions must be
+ * serialized across instances as well as within one instance.
+ */
+private val hwbpServerLifecycleLock = ReentrantLock()
+
 internal data class HwbpServerBindings(
     val events: Flow<HwbpEvent>,
     val points: () -> List<HwbpObserveParams>,
     val savedConfigs: () -> List<HwbpSavedConfig> = { emptyList() },
     val backtraceMode: () -> String = { "fp" },
+    val installedApps: suspend () -> Result<List<InstalledApp>> = {
+        Result.success(emptyList())
+    },
+    val libraryNames: suspend (String?, Int?) -> Result<List<String>> = { _, _ ->
+        Result.success(emptyList())
+    },
     val observe: suspend (HwbpObserveParams) -> Result<Unit>,
     val unobserve: suspend (Int, Long) -> Result<Unit>,
     val setBacktraceMode: (String) -> Result<Unit> = { Result.success(Unit) },
@@ -131,6 +159,42 @@ internal fun Application.installHwbpWebRoutes(
         get("/") {
             call.respondAsset("index.html", assetLoader)
         }
+        get("/api/apps") {
+            bindings.installedApps().fold(
+                onSuccess = { apps -> call.respondHwbpJson(encodeHwbpInstalledApps(apps)) },
+                onFailure = { error ->
+                    call.respondHwbpJson(
+                        encodeHwbpApiError(error),
+                        HttpStatusCode.InternalServerError,
+                    )
+                },
+            )
+        }
+        get("/api/libraries") {
+            val target = decodeLibraryTargetQuery(
+                packageName = call.request.queryParameters["packageName"],
+                pid = call.request.queryParameters["pid"],
+            )
+            if (target.isFailure) {
+                call.respondHwbpJson(
+                    encodeHwbpApiError(target.exceptionOrNull()!!),
+                    HttpStatusCode.BadRequest,
+                )
+                return@get
+            }
+            val (packageName, pid) = target.getOrThrow()
+            bindings.libraryNames(packageName, pid).fold(
+                onSuccess = { libraries ->
+                    call.respondHwbpJson(encodeHwbpLibraryNames(libraries))
+                },
+                onFailure = { error ->
+                    call.respondHwbpJson(
+                        encodeHwbpApiError(error),
+                        HttpStatusCode.InternalServerError,
+                    )
+                },
+            )
+        }
         get("/static/{path...}") {
             val segments = call.parameters.getAll("path").orEmpty()
             if (segments.isEmpty() || segments.any(::isUnsafePathSegment)) {
@@ -186,6 +250,25 @@ internal fun Application.installHwbpWebRoutes(
     }
 }
 
+private fun decodeLibraryTargetQuery(
+    packageName: String?,
+    pid: String?,
+): Result<Pair<String?, Int?>> = runCatching {
+    val normalizedPackageName = packageName?.trim()?.takeIf(String::isNotEmpty)
+    val normalizedPid = pid?.trim()?.takeIf(String::isNotEmpty)
+    require((normalizedPackageName == null) != (normalizedPid == null)) {
+        "Specify either packageName or pid"
+    }
+    if (normalizedPackageName != null) {
+        normalizePackageName(normalizedPackageName) to null
+    } else {
+        val parsedPid = normalizedPid?.toIntOrNull()
+            ?: throw IllegalArgumentException("pid must be a positive integer")
+        require(parsedPid > 0) { "pid must be a positive integer" }
+        null to parsedPid
+    }
+}
+
 private fun isUnsafePathSegment(segment: String): Boolean =
     segment.isBlank() || segment == "." || segment == ".." || '\\' in segment
 
@@ -199,6 +282,17 @@ private suspend fun ApplicationCall.respondAsset(
         return
     }
     respondBytes(bytes, contentTypeFor(path))
+}
+
+private suspend fun ApplicationCall.respondHwbpJson(
+    text: String,
+    status: HttpStatusCode = HttpStatusCode.OK,
+) {
+    respondBytes(
+        bytes = text.encodeToByteArray(),
+        contentType = ContentType.Application.Json.withCharset(Charsets.UTF_8),
+        status = status,
+    )
 }
 
 private fun contentTypeFor(path: String): ContentType = when {
@@ -216,51 +310,81 @@ internal class HwbpWebServer(
     private val bindings: HwbpServerBindings,
     private val port: Int = HWBP_SERVER_PORT,
     private val addressProvider: () -> String? = ::siteLocalIpv4Address,
-    private val engineFactory: (Application.() -> Unit) -> ApplicationEngine = { module ->
-        embeddedServer(CIO, host = "0.0.0.0", port = port, module = module)
+    private val engineFactory: (CoroutineScope, Application.() -> Unit) -> ApplicationEngine = { scope, module ->
+        scope.embeddedServer(
+            CIO,
+            host = "0.0.0.0",
+            port = port,
+            configure = { reuseAddress = true },
+            module = module,
+        )
     },
+    private val portAvailable: () -> Boolean = { isTcpPortAvailable(port) },
+    private val sleeper: (Long) -> Unit = Thread::sleep,
 ) : HwbpServer {
     private val hub = HwbpClientHub()
     private val _running = MutableStateFlow(false)
     private val _httpUrl = MutableStateFlow<String?>(null)
     private val _webSocketUrl = MutableStateFlow<String?>(null)
     private var engine: ApplicationEngine? = null
+    private var engineScope: CoroutineScope? = null
 
     override val running: StateFlow<Boolean> = _running.asStateFlow()
     override val connectedClients: StateFlow<Int> = hub.connectedClients
     override val httpUrl: StateFlow<String?> = _httpUrl.asStateFlow()
     override val webSocketUrl: StateFlow<String?> = _webSocketUrl.asStateFlow()
 
-    @Synchronized
-    override fun start(): Result<Unit> {
-        if (_running.value) return Result.success(Unit)
-        val nextEngine = engineFactory {
-            installHwbpWebRoutes(bindings, ::loadAsset, hub)
+    override fun start(): Result<Unit> = hwbpServerLifecycleLock.withLock {
+        if (_running.value) return@withLock Result.success(Unit)
+
+        val portReady = waitForPortRelease()
+        if (portReady.isFailure) {
+            markStopped()
+            return@withLock portReady
         }
-        return runCatching {
-            nextEngine.start(wait = false)
-            engine = nextEngine
+
+        val engineFailure = AtomicReference<Throwable?>(null)
+        val nextScope = CoroutineScope(
+            SupervisorJob() + CoroutineExceptionHandler { _, error ->
+                engineFailure.compareAndSet(null, error)
+            },
+        )
+        var nextEngine: ApplicationEngine? = null
+        val result = runCatching {
+            val created = engineFactory(nextScope) {
+                installHwbpWebRoutes(bindings, ::loadAsset, hub)
+            }
+            nextEngine = created
+            created.start(wait = false)
+            engineFailure.get()?.let { throw it }
+
+            engine = created
+            engineScope = nextScope
             val address = addressProvider()
             _httpUrl.value = address?.let { "http://$it:$port" }
             _webSocketUrl.value = address?.let { "ws://$it:$port/ws" }
             _running.value = true
-        }.onFailure {
-            runCatching { nextEngine.stop(0, 0) }
-            engine = null
-            hub.clear()
-            _running.value = false
-            _httpUrl.value = null
-            _webSocketUrl.value = null
         }
+        if (result.isFailure) {
+            nextEngine?.let { failedEngine ->
+                runCatching { failedEngine.stop(0, SERVER_STOP_TIMEOUT_MILLIS) }
+            }
+            nextScope.cancel()
+            markStopped()
+        }
+        result
     }
 
-    @Synchronized
-    override fun stop() {
-        val activeEngine = engine ?: return
-        runCatching { activeEngine.stop(500, 1_500) }
+    override fun stop() = hwbpServerLifecycleLock.withLock {
+        val activeEngine = engine
+        val activeScope = engineScope
         engine = null
-        hub.clear()
-        _running.value = false
+        engineScope = null
+        activeEngine?.let { runningEngine ->
+            runCatching { runningEngine.stop(0, SERVER_STOP_TIMEOUT_MILLIS) }
+        }
+        activeScope?.cancel()
+        markStopped()
     }
 
     override suspend fun broadcastState() {
@@ -271,12 +395,38 @@ internal class HwbpWebServer(
 
     private suspend fun loadAsset(path: String): ByteArray? = withContext(Dispatchers.IO) {
         try {
-            context.assets.open("web/$path").use { stream -> stream.readBytes() }
+            // HWBP and Syscall share the same Vite/Preact bundle.  The bundle
+            // selects the feature from the server port (or an explicit query).
+            context.assets.open("observe-web/$path").use { stream -> stream.readBytes() }
         } catch (_: IOException) {
             null
         }
     }
+
+    private fun waitForPortRelease(): Result<Unit> = try {
+        repeat(PORT_RELEASE_ATTEMPTS) { attempt ->
+            if (portAvailable()) return Result.success(Unit)
+            if (attempt < PORT_RELEASE_ATTEMPTS - 1) sleeper(PORT_RELEASE_RETRY_MILLIS)
+        }
+        Result.failure(BindException("Port $port is still in use"))
+    } catch (error: Exception) {
+        Result.failure(error)
+    }
+
+    private fun markStopped() {
+        hub.clear()
+        _running.value = false
+        _httpUrl.value = null
+        _webSocketUrl.value = null
+    }
 }
+
+private fun isTcpPortAvailable(port: Int): Boolean = runCatching {
+    ServerSocket().use { socket ->
+        socket.reuseAddress = true
+        socket.bind(InetSocketAddress("0.0.0.0", port))
+    }
+}.isSuccess
 
 private fun siteLocalIpv4Address(): String? = runCatching {
     Collections.list(NetworkInterface.getNetworkInterfaces())

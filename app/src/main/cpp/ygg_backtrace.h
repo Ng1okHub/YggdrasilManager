@@ -31,3 +31,9 @@ bool ygg_resolve_library_target(uint32_t pid,
                                 uint64_t offset,
                                 uint64_t *out_address,
                                 std::string *out_error);
+
+/** Collect loaded shared-object names from maps and ELF SONAMEs, returning false on parse failure. */
+bool ygg_list_library_names(uint32_t pid,
+                            const char *maps_text,
+                            std::vector<std::string> *out_names,
+                            std::string *out_error);

@@ -3,8 +3,30 @@ plugins {
     alias(libs.plugins.compose.compiler)
 }
 
+def managerVersion = new Properties()
+managerVersion.load(new StringReader(providers.fileContents(rootProject.layout.projectDirectory.file('version.properties')).asText.get()))
+def managerVersionName = managerVersion.getProperty('versionName', '')
+def managerVersionCode = managerVersion.getProperty('versionCode', '')
+if (!(managerVersionName ==~ /(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?/) ||
+        !(managerVersionCode ==~ /[1-9]\d*/) || new BigInteger(managerVersionCode) > 2100000000) {
+    throw new GradleException('Invalid version.properties: use SemVer without build metadata and versionCode 1..2100000000.')
+}
+
+def signingProperties = new Properties()
+def signingPropertiesText = providers.fileContents(rootProject.layout.projectDirectory.file('keystore.properties')).asText.orElse('').get()
+signingProperties.load(new StringReader(signingPropertiesText))
+def signingValues = [
+    storeFile: providers.environmentVariable('YGGDRASIL_KEYSTORE_FILE').orElse(signingProperties.getProperty('storeFile', '')).get(),
+    storePassword: providers.environmentVariable('YGGDRASIL_KEYSTORE_PASSWORD').orElse(signingProperties.getProperty('storePassword', '')).get(),
+    keyAlias: providers.environmentVariable('YGGDRASIL_KEY_ALIAS').orElse(signingProperties.getProperty('keyAlias', '')).get(),
+    keyPassword: providers.environmentVariable('YGGDRASIL_KEY_PASSWORD').orElse(signingProperties.getProperty('keyPassword', '')).get()
+]
+def hasReleaseSigning = signingValues.values().every { !it.isBlank() }
+
 android {
     namespace 'ng1ok.yggdrasilmanager'
+    ndkVersion '28.2.13676358'
+    buildToolsVersion '36.0.0'
     compileSdk {
         version = release(36) {
             minorApiLevel = 1
@@ -15,14 +37,38 @@ android {
         applicationId "ng1ok.yggdrasilmanager"
         minSdk 24
         targetSdk 36
-        versionCode 1
-        versionName "1.0"
+        versionCode managerVersionCode.toInteger()
+        versionName managerVersionName
+
+        // The KPM ABI and bundled self-test target arm64; other APK ABIs cannot use them.
+        ndk {
+            abiFilters 'arm64-v8a'
+        }
 
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            release {
+                storeFile rootProject.file(signingValues.storeFile)
+                storePassword signingValues.storePassword
+                keyAlias signingValues.keyAlias
+                keyPassword signingValues.keyPassword
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            applicationIdSuffix '.debug'
+            versionNameSuffix '-debug'
+        }
         release {
+            if (hasReleaseSigning) {
+                signingConfig signingConfigs.release
+            }
+            // Root services and JNI use reflection/name lookup; keep shrinking disabled until tested on a device.
             optimization {
                 enable false
             }
@@ -43,6 +89,19 @@ android {
         buildConfig = true
         aidl = true
     }
+}
+
+def verifyReleaseSigning = tasks.register('verifyReleaseSigning') {
+    group = 'verification'
+    description = 'Rejects release builds without explicit signing credentials.'
+    doLast {
+        if (!hasReleaseSigning) {
+            throw new GradleException('Release signing is required. Run node scripts/generate-signing-key.mjs or configure all YGGDRASIL_KEYSTORE_* / YGGDRASIL_KEY_* variables. See docs/release/releasing.en.md.')
+        }
+    }
+}
+tasks.matching { it.name == 'preReleaseBuild' }.configureEach {
+    dependsOn(verifyReleaseSigning)
 }
 
 dependencies {
@@ -71,4 +130,69 @@ dependencies {
     testImplementation(libs.ktor.client.websockets)
     androidTestImplementation(libs.ext.junit)
     androidTestImplementation(libs.espresso.core)
+}
+
+/*
+ * yggdrasil_test.cpp is an arm64-only, zero-argument KPM self-test. It is not
+ * part of the JNI library: the Manager ships it as an executable asset and
+ * runs it through su, because several sections need root and the test must
+ * own a standalone process (fork/ptrace/freeze).
+ */
+def selfTestAssetsDir = layout.buildDirectory.dir("generated/yggdrasilSelfTest/assets")
+def selfTestNdkDirectory = androidComponents.sdkComponents.ndkDirectory
+
+/** Exposes generated assets so AGP can wire every consumer, including lint, to the producer. */
+abstract class BuildYggdrasilSelfTestTask extends Exec {
+    /** Directory containing the arm64 self-test asset packaged by each variant. */
+    @OutputDirectory
+    abstract DirectoryProperty getAssetsDirectory()
+}
+
+def buildYggdrasilSelfTest = tasks.register("buildYggdrasilSelfTest", BuildYggdrasilSelfTestTask) {
+    group = "build"
+    description = "Builds the arm64-v8a Yggdrasil KPM self-test executable into app assets."
+    assetsDirectory.set(selfTestAssetsDir)
+
+    def cppDir = file("src/main/cpp")
+    def sourceFile = file("src/main/cpp/yggdrasil_test.cpp")
+    def headerFile = file("src/main/cpp/yggdrasil.h")
+    def formatHeaderFile = file("src/main/cpp/yggdrasil_syscall_format.h")
+    def outputFile = assetsDirectory.file("yggdrasil_test/arm64-v8a/yggdrasil_test")
+
+    inputs.file(sourceFile)
+    inputs.file(headerFile)
+    inputs.file(formatHeaderFile)
+    inputs.property("ndkDirectory", selfTestNdkDirectory.map { it.asFile.absolutePath })
+
+    doFirst {
+        def ndkDir = selfTestNdkDirectory.get().asFile
+        def osName = System.getProperty("os.name").toLowerCase(Locale.ROOT)
+        def isWindows = osName.contains("windows")
+        def hostTag = isWindows ? "windows-x86_64" : (osName.contains("mac") ? "darwin-x86_64" : "linux-x86_64")
+        def compiler = new File(ndkDir, "toolchains/llvm/prebuilt/${hostTag}/bin/${isWindows ? 'clang++.exe' : 'clang++'}")
+        if (!compiler.isFile()) {
+            throw new GradleException("找不到 NDK clang++：${compiler}。請確認 Android NDK 已安裝。")
+        }
+
+        def output = outputFile.get().asFile
+        output.parentFile.mkdirs()
+        commandLine(
+            compiler.absolutePath,
+            "--target=aarch64-linux-android24",
+            "-std=c++17",
+            "-O2",
+            "-fPIE",
+            "-pie",
+            "-static-libstdc++",
+            "-I", cppDir.absolutePath,
+            "-o", output.absolutePath,
+            sourceFile.absolutePath
+        )
+    }
+}
+
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.sources.assets.addGeneratedSourceDirectory(buildYggdrasilSelfTest) { it.assetsDirectory }
+    }
 }

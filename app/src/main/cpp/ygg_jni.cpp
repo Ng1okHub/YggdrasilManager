@@ -4,6 +4,9 @@
 #include <string.h>
 #include <time.h>
 #include <pthread.h>
+#include <unistd.h>
+#include <android/log.h>
+#include <algorithm>
 #include <atomic>
 #include <cinttypes>
 #include <cstdio>
@@ -11,7 +14,19 @@
 #include <vector>
 
 #include "yggdrasil.h"
+#include "yggdrasil_syscall_format.h"
 #include "ygg_backtrace.h"
+
+// Diagnostic logging for the syscall-observe listener. Filter with:
+//   adb logcat -s YggSyscall
+// These logs trace the errno-5 (EIO) listener-stop path; see analysis notes.
+#define YGG_SYSCALL_LOG_TAG "YggSyscall"
+#define YGG_SLOGI(...) \
+    __android_log_print(ANDROID_LOG_INFO, YGG_SYSCALL_LOG_TAG, __VA_ARGS__)
+#define YGG_SLOGW(...) \
+    __android_log_print(ANDROID_LOG_WARN, YGG_SYSCALL_LOG_TAG, __VA_ARGS__)
+#define YGG_SLOGE(...) \
+    __android_log_print(ANDROID_LOG_ERROR, YGG_SYSCALL_LOG_TAG, __VA_ARGS__)
 
 static JavaVM *g_jvm = nullptr;
 static jobject g_callback_ref = nullptr;
@@ -20,8 +35,44 @@ static pthread_t g_listen_thread = 0;
 static std::atomic<bool> g_stop{false};
 static pthread_mutex_t g_listen_mutex = PTHREAD_MUTEX_INITIALIZER;
 
+static jobject g_syscall_callback_ref = nullptr;
+static jmethodID g_on_syscall_event_mid = nullptr;
+static jmethodID g_on_syscall_listener_failure_mid = nullptr;
+static pthread_t g_syscall_listen_thread = 0;
+static std::atomic<bool> g_syscall_stop{false};
+static pthread_mutex_t g_syscall_listen_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t g_syscall_start_cond = PTHREAD_COND_INITIALIZER;
+static bool g_syscall_start_pending = false;
+static int g_syscall_start_result = -EIO;
+
+static_assert(sizeof(struct ygg_syscall_rule_request) ==
+                  YGG_SYSCALL_RULE_REQUEST_SIZE,
+              "unexpected syscall rule ABI layout");
+static_assert(sizeof(struct ygg_syscall_event) ==
+                  YGG_SYSCALL_EVENT_HEADER_SIZE,
+              "unexpected syscall event ABI layout");
+static_assert(sizeof(struct ygg_syscall_capture_tlv) ==
+                  YGG_SYSCALL_CAPTURE_TLV_SIZE,
+              "unexpected syscall capture ABI layout");
+static_assert(sizeof(struct ygg_syscall_event_record) ==
+                  YGG_SYSCALL_EVENT_SIZE_MAX,
+              "unexpected syscall event record ABI layout");
+static_assert(sizeof(struct ygg_syscall_read_event_request) ==
+                  YGG_SYSCALL_READ_REQUEST_SIZE,
+              "unexpected syscall read ABI layout");
+static_assert(sizeof(struct ygg_syscall_backtrace_event) ==
+                  YGG_SYSCALL_BACKTRACE_EVENT_HEADER_SIZE,
+              "unexpected syscall backtrace ABI layout");
+
+/* The capture schema table and its descriptor builder come from the KPM's
+ * shared header, so the Manager auto-captures exactly the arguments the
+ * module's own userspace helper and self-test cover. */
+
 extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) {
     g_jvm = vm;
+    // pid helps distinguish the app process from the libsu root process, since
+    // the listener thread runs in root and must be able to attach to the JVM.
+    YGG_SLOGI("JNI_OnLoad: g_jvm cached (pid=%d)", getpid());
     return JNI_VERSION_1_6;
 }
 
@@ -33,6 +84,21 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_checkAvailable(JNIEnv *, jobj
 extern "C" JNIEXPORT jlong JNICALL
 Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_getVersion(JNIEnv *, jobject) {
     return static_cast<jlong>(prctl(PR_YGGDRASIL_GET_VERSION, 0, 0, 0, 0));
+}
+
+extern "C" JNIEXPORT jintArray JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallCaptureSupportedNumbers(
+        JNIEnv *env, jobject) {
+    std::vector<jint> numbers;
+    numbers.reserve(sizeof(arm64_syscall_schemas) / sizeof(arm64_syscall_schemas[0]));
+    for (const auto &schema : arm64_syscall_schemas) {
+        numbers.push_back(static_cast<jint>(schema.nr));
+    }
+
+    jintArray result = env->NewIntArray(static_cast<jsize>(numbers.size()));
+    if (!result) return nullptr;
+    env->SetIntArrayRegion(result, 0, static_cast<jsize>(numbers.size()), numbers.data());
+    return result;
 }
 
 extern "C" JNIEXPORT jint JNICALL
@@ -71,6 +137,691 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_hideDbg(
     }
     long ret = prctl(PR_YGGDRASIL_HIDE_DBG, &req, 0, 0, 0);
     return (jint)(ret < 0 ? -errno : 0);
+}
+
+static bool copy_maps_string(JNIEnv *env, jstring value, char *dst, size_t capacity) {
+    if (!value || !dst || capacity == 0) return false;
+    const char *text = env->GetStringUTFChars(value, nullptr);
+    if (!text) return false;
+    const size_t length = strlen(text);
+    const bool valid = length < capacity;
+    if (valid) {
+        memcpy(dst, text, length);
+        dst[length] = '\0';
+    }
+    env->ReleaseStringUTFChars(value, text);
+    return valid;
+}
+
+static jint maps_rule_impl(
+        JNIEnv *env, uint32_t op, jboolean has_pid, jint pid,
+        jint action, jint match_kind, jint rule_flags,
+        jstring match_perms, jstring set_perms,
+        jlong addr_start, jlong addr_end, jstring pattern) {
+    struct ygg_maps_request req = {};
+    req.size = sizeof(req);
+    req.version = YGG_MAPS_ABI_VERSION;
+    req.op = op;
+    if (has_pid) {
+        if (pid <= 0) return -EINVAL;
+        req.flags = YGG_MAPS_F_TARGET_PID;
+        req.pid = static_cast<uint32_t>(pid);
+    }
+    req.rule.action = static_cast<uint32_t>(action);
+    req.rule.match_kind = static_cast<uint32_t>(match_kind);
+    req.rule.rule_flags = static_cast<uint32_t>(rule_flags);
+    req.rule.addr_start = static_cast<uint64_t>(addr_start);
+    req.rule.addr_end = static_cast<uint64_t>(addr_end);
+    if (!copy_maps_string(env, match_perms, req.rule.match_perms,
+                          sizeof(req.rule.match_perms)) ||
+        !copy_maps_string(env, set_perms, req.rule.set_perms,
+                          sizeof(req.rule.set_perms)) ||
+        !copy_maps_string(env, pattern, req.rule.pattern,
+                          sizeof(req.rule.pattern))) {
+        return -EINVAL;
+    }
+    const long ret = prctl(PR_YGGDRASIL_MAPS_POLICY, &req, 0, 0, 0);
+    return static_cast<jint>(ret < 0 ? -errno : 0);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_mapsAddRule(
+        JNIEnv *env, jobject, jboolean has_pid, jint pid,
+        jint action, jint match_kind, jint rule_flags,
+        jstring match_perms, jstring set_perms,
+        jlong addr_start, jlong addr_end, jstring pattern) {
+    return maps_rule_impl(env, YGG_MAPS_OP_ADD_RULE, has_pid, pid, action,
+                          match_kind, rule_flags, match_perms, set_perms,
+                          addr_start, addr_end, pattern);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_mapsRemoveRule(
+        JNIEnv *env, jobject, jboolean has_pid, jint pid,
+        jint action, jint match_kind, jint rule_flags,
+        jstring match_perms, jstring set_perms,
+        jlong addr_start, jlong addr_end, jstring pattern) {
+    return maps_rule_impl(env, YGG_MAPS_OP_REMOVE_RULE, has_pid, pid, action,
+                          match_kind, rule_flags, match_perms, set_perms,
+                          addr_start, addr_end, pattern);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_mapsClear(
+        JNIEnv *, jobject, jboolean has_pid, jint pid, jboolean all_scopes) {
+    struct ygg_maps_request req = {};
+    req.size = sizeof(req);
+    req.version = YGG_MAPS_ABI_VERSION;
+    req.op = YGG_MAPS_OP_CLEAR;
+    if (has_pid) {
+        if (pid <= 0 || all_scopes) return -EINVAL;
+        req.flags = YGG_MAPS_F_TARGET_PID;
+        req.pid = static_cast<uint32_t>(pid);
+    } else if (all_scopes) {
+        req.flags = YGG_MAPS_F_ALL_SCOPES;
+    }
+    const long ret = prctl(PR_YGGDRASIL_MAPS_POLICY, &req, 0, 0, 0);
+    return static_cast<jint>(ret < 0 ? -errno : 0);
+}
+
+extern "C" JNIEXPORT jbyteArray JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_mapsGet(
+        JNIEnv *env, jobject, jboolean has_pid, jint pid) {
+    if (has_pid && pid <= 0) return nullptr;
+    std::vector<uint8_t> buffer(
+        sizeof(struct ygg_maps_dump) +
+        YGG_MAPS_MAX_RULES * sizeof(struct ygg_maps_rule));
+    struct ygg_maps_request req = {};
+    req.size = sizeof(req);
+    req.version = YGG_MAPS_ABI_VERSION;
+    req.op = YGG_MAPS_OP_GET;
+    if (has_pid) {
+        req.flags = YGG_MAPS_F_TARGET_PID;
+        req.pid = static_cast<uint32_t>(pid);
+    }
+    req.buffer = reinterpret_cast<uint64_t>(buffer.data());
+    req.buffer_size = static_cast<uint32_t>(buffer.size());
+    const long ret = prctl(PR_YGGDRASIL_MAPS_POLICY, &req, 0, 0, 0);
+    if (ret < 0) return nullptr;
+    jbyteArray result = env->NewByteArray(static_cast<jsize>(buffer.size()));
+    if (!result) return nullptr;
+    env->SetByteArrayRegion(
+        result, 0, static_cast<jsize>(buffer.size()),
+        reinterpret_cast<const jbyte *>(buffer.data()));
+    return result;
+}
+
+static jint syscall_configure_impl(
+        jint op, jint flags, jint syscallNr, jlong targetId,
+        jint backtrace_stack_size) {
+    struct ygg_syscall_rule_request req = {};
+    const uint32_t selector_flags = YGG_SYSCALL_F_SINGLE_THREAD |
+                                    YGG_SYSCALL_F_TARGET_UID;
+    const uint32_t observe_flags = selector_flags |
+                                   YGG_SYSCALL_F_TRACE_ENTER |
+                                   YGG_SYSCALL_F_TRACE_EXIT |
+                                   YGG_SYSCALL_F_CAPTURE_BACKTRACE;
+    const uint32_t request_flags = (uint32_t)flags;
+
+    if (syscallNr < 0 || (uint32_t)syscallNr >= YGG_ARM64_SYSCALL_COUNT) {
+        return -EINVAL;
+    }
+    if (op != YGG_SYSCALL_RULE_SET && op != YGG_SYSCALL_RULE_DELETE) {
+        return -EINVAL;
+    }
+    if (request_flags & YGG_SYSCALL_F_TARGET_UID) {
+        if (targetId < 0 || targetId > (jlong)UINT32_MAX) return -EINVAL;
+        req.target_uid = (uint32_t)targetId;
+    } else {
+        if (targetId < 0 || targetId > (jlong)INT32_MAX ||
+            ((request_flags & YGG_SYSCALL_F_SINGLE_THREAD) && !targetId)) {
+            return -EINVAL;
+        }
+        req.target_pid = (uint32_t)targetId;
+    }
+
+    req.size = sizeof(req);
+    req.version = YGG_SYSCALL_ABI_VERSION;
+    req.op = (uint32_t)op;
+    req.syscall_nr = (uint32_t)syscallNr;
+    if (op == YGG_SYSCALL_RULE_SET) {
+        if (request_flags & ~observe_flags ||
+            !(request_flags &
+              (YGG_SYSCALL_F_TRACE_ENTER | YGG_SYSCALL_F_TRACE_EXIT))) {
+            return -EINVAL;
+        }
+        req.flags = request_flags;
+        if (request_flags & YGG_SYSCALL_F_CAPTURE_BACKTRACE) {
+            if (backtrace_stack_size < 0 ||
+                backtrace_stack_size > (jint)YGG_SYSCALL_BACKTRACE_STACK_MAX) {
+                return -EINVAL;
+            }
+            req.backtrace_stack_size = (uint32_t)backtrace_stack_size;
+        }
+        const int capture_status = populate_auto_capture_descriptors(
+                req.syscall_nr, req.flags,
+                YGG_SYSCALL_CAPTURE_PAYLOAD_MAX, &req);
+        if (capture_status != 0) {
+            // Either the syscall has no schema, or the selected phases enable
+            // none of its captures. The rule is still a valid numeric
+            // observation, but the module rejects a non-zero limit paired with
+            // zero descriptors, so drop the capture request entirely.
+            req.capture_count = 0;
+            req.capture_total_limit = 0;
+        }
+    } else {
+        if (request_flags & ~selector_flags) {
+            return -EINVAL;
+        }
+        req.flags = request_flags;
+    }
+
+    long ret = prctl(PR_YGGDRASIL_SYSCALL_CONFIG, &req, 0, 0, 0);
+    if (ret < 0 && errno == EOPNOTSUPP && req.capture_count > 0) {
+        YGG_SLOGW("capture unavailable for syscall %u; retrying numeric-only rule",
+                  req.syscall_nr);
+        req.capture_count = 0;
+        req.capture_total_limit = 0;
+        memset(req.captures, 0, sizeof(req.captures));
+        ret = prctl(PR_YGGDRASIL_SYSCALL_CONFIG, &req, 0, 0, 0);
+    }
+    return (jint)(ret < 0 ? -errno : 0);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallConfigure(
+        JNIEnv *, jobject, jint op, jint flags, jint syscallNr, jlong targetId) {
+    return syscall_configure_impl(op, flags, syscallNr, targetId, 0);
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallConfigureWithBacktrace(
+        JNIEnv *, jobject, jint op, jint flags, jint syscallNr, jlong targetId,
+        jint backtraceStackSize) {
+    return syscall_configure_impl(
+        op, flags, syscallNr, targetId, backtraceStackSize);
+}
+
+static void unregister_syscall_listener() {
+    struct ygg_syscall_read_event_request req = {};
+
+    req.size = sizeof(req);
+    req.version = YGG_SYSCALL_ABI_VERSION;
+    req.flags = YGG_SYSCALL_READ_F_UNREGISTER;
+    prctl(PR_YGGDRASIL_SYSCALL_READ_EVENT, &req, 0, 0, 0);
+}
+
+static bool is_valid_syscall_event(
+        const struct ygg_syscall_event_record *record, long result) {
+    static constexpr uint32_t capture_status_mask =
+            YGG_SYSCALL_CAPTURE_STATUS_NULL |
+            YGG_SYSCALL_CAPTURE_STATUS_FAULT |
+            YGG_SYSCALL_CAPTURE_STATUS_TRUNCATED |
+            YGG_SYSCALL_CAPTURE_STATUS_SKIPPED |
+            YGG_SYSCALL_CAPTURE_STATUS_BUDGET;
+    if (!record || result < 0 || (size_t)result < sizeof(record->event) ||
+        (size_t)result > sizeof(*record)) {
+        return false;
+    }
+    const struct ygg_syscall_event *event = &record->event;
+    if (event->magic != YGG_SYSCALL_EVENT_MAGIC ||
+        event->version != YGG_SYSCALL_EVENT_VERSION ||
+        event->header_size != sizeof(*event) ||
+        event->total_size != (uint32_t)result ||
+        event->payload_size !=
+            (uint32_t)((size_t)result - sizeof(*event)) ||
+        event->payload_size > YGG_SYSCALL_CAPTURE_PAYLOAD_MAX ||
+        event->capture_count > YGG_SYSCALL_CAPTURE_COUNT_MAX ||
+        event->phase != YGG_SYSCALL_PHASE_ENTER &&
+            event->phase != YGG_SYSCALL_PHASE_EXIT ||
+        event->abi != YGG_SYSCALL_EVENT_ABI_ARM64 || !event->call_id ||
+        event->syscall_nr >= YGG_ARM64_SYSCALL_COUNT ||
+        (!!event->capture_count !=
+            !!(event->event_flags & YGG_SYSCALL_EVENT_F_HAS_CAPTURES))) {
+        return false;
+    }
+
+    const uint8_t *cursor =
+            reinterpret_cast<const uint8_t *>(record) + event->header_size;
+    const uint8_t *end = cursor + event->payload_size;
+    bool has_partial = false;
+    for (uint32_t i = 0; i < event->capture_count; ++i) {
+        struct ygg_syscall_capture_tlv capture = {};
+        const size_t remaining = static_cast<size_t>(end - cursor);
+        if (remaining < sizeof(capture)) return false;
+        memcpy(&capture, cursor, sizeof(capture));
+        if (capture.size < sizeof(capture) || capture.size > remaining ||
+            (capture.size & 7U)) {
+            return false;
+        }
+        const size_t data_capacity = capture.size - sizeof(capture);
+        if (capture.captured_length > data_capacity ||
+            capture.captured_length > capture.original_length ||
+            capture.size !=
+                ((sizeof(capture) + capture.captured_length + 7U) & ~7U) ||
+            capture.arg_index >= YGG_SYSCALL_ARG_COUNT ||
+            (capture.kind != YGG_SYSCALL_CAPTURE_CSTRING &&
+             capture.kind != YGG_SYSCALL_CAPTURE_BYTES &&
+             capture.kind != YGG_SYSCALL_CAPTURE_STRUCT) ||
+            capture.schema_id > YGG_SYSCALL_SCHEMA_STAT ||
+            (capture.schema_id != YGG_SYSCALL_SCHEMA_NONE &&
+             capture.kind != YGG_SYSCALL_CAPTURE_STRUCT) ||
+            capture.phase != event->phase ||
+            (capture.pointer_source != YGG_SYSCALL_CAPTURE_POINTER_ORIGINAL &&
+             capture.pointer_source != YGG_SYSCALL_CAPTURE_POINTER_EFFECTIVE) ||
+            (capture.status & ~capture_status_mask) || capture.reserved) {
+            return false;
+        }
+        has_partial |= capture.status != 0;
+        cursor += capture.size;
+    }
+    return cursor == end &&
+           has_partial ==
+               !!(event->event_flags & YGG_SYSCALL_EVENT_F_CAPTURE_PARTIAL);
+}
+
+static struct ygg_syscall_backtrace_event_record g_syscall_backtrace_record;
+
+static bool is_valid_syscall_backtrace(
+        const struct ygg_syscall_backtrace_event_record *record,
+        size_t bytes, uint64_t expected_call_id, uint32_t expected_phase) {
+    if (!record || bytes < sizeof(record->event) || bytes > sizeof(*record)) {
+        return false;
+    }
+    const struct ygg_syscall_backtrace_event *event =
+        &record->event;
+    if (event->magic != YGG_SYSCALL_BACKTRACE_EVENT_MAGIC ||
+        event->version != YGG_SYSCALL_BACKTRACE_EVENT_VERSION ||
+        event->header_size != sizeof(*event) ||
+        event->total_size != (uint32_t)bytes ||
+        event->stack_copied_size !=
+            (uint32_t)(bytes - sizeof(*event)) ||
+        event->stack_copied_size > YGG_SYSCALL_BACKTRACE_STACK_MAX ||
+        (event->flags & ~((uint32_t)YGG_SYSCALL_BACKTRACE_F_USER |
+                          YGG_SYSCALL_BACKTRACE_F_COMPAT |
+                          YGG_SYSCALL_BACKTRACE_F_STACK |
+                          YGG_SYSCALL_BACKTRACE_F_PARTIAL)) ||
+        (event->phase != YGG_SYSCALL_PHASE_ENTER &&
+            event->phase != YGG_SYSCALL_PHASE_EXIT) ||
+        !event->call_id || event->call_id != expected_call_id ||
+        event->phase != expected_phase || event->syscall_nr >= YGG_ARM64_SYSCALL_COUNT) {
+        return false;
+    }
+    return true;
+}
+
+static void signal_syscall_start_result(int result) {
+    pthread_mutex_lock(&g_syscall_listen_mutex);
+    if (g_syscall_start_pending) {
+        g_syscall_start_result = result;
+        g_syscall_start_pending = false;
+        pthread_cond_broadcast(&g_syscall_start_cond);
+    }
+    pthread_mutex_unlock(&g_syscall_listen_mutex);
+}
+
+static void notify_syscall_listener_failure(JNIEnv *env, int error) {
+    if (!env || !g_syscall_callback_ref ||
+        !g_on_syscall_listener_failure_mid) {
+        YGG_SLOGE("listener failure NOT delivered (errno=%d): env=%p ref=%p mid=%p",
+                  -error, (void *)env, (void *)g_syscall_callback_ref,
+                  (void *)g_on_syscall_listener_failure_mid);
+        return;
+    }
+    // error is the negated errno (e.g. -EIO); Kotlin negates it back to 5.
+    YGG_SLOGE("delivering onListenerFailure to Kotlin: errno=%d", -error);
+    env->CallVoidMethod(g_syscall_callback_ref,
+                        g_on_syscall_listener_failure_mid,
+                        (jint)error);
+    if (env->ExceptionCheck()) env->ExceptionClear();
+}
+
+static void clear_syscall_callback(JNIEnv *env) {
+    if (g_syscall_callback_ref) {
+        env->DeleteGlobalRef(g_syscall_callback_ref);
+        g_syscall_callback_ref = nullptr;
+    }
+    g_on_syscall_event_mid = nullptr;
+    g_on_syscall_listener_failure_mid = nullptr;
+}
+
+static void *syscall_listen_thread(void *) {
+    JNIEnv *env = nullptr;
+    // Candidate (A): AttachCurrentThread failing here is the only in-source EIO
+    // that fires at startup. Common in the libsu root process if the native lib
+    // was not loaded there (g_jvm==null) or the JVM refuses the attach.
+    if (!g_jvm || g_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) {
+        YGG_SLOGE("listener startup FAILED (errno=EIO/5): AttachCurrentThread "
+                  "g_jvm=%p env=%p pid=%d", (void *)g_jvm, (void *)env, getpid());
+        g_syscall_stop.store(true);
+        signal_syscall_start_result(-EIO);
+        return nullptr;
+    }
+    if (!g_on_syscall_event_mid || !g_on_syscall_listener_failure_mid) {
+        YGG_SLOGE("listener startup FAILED (errno=EIO/5): null method id "
+                  "event=%p failure=%p", (void *)g_on_syscall_event_mid,
+                  (void *)g_on_syscall_listener_failure_mid);
+        g_syscall_stop.store(true);
+        signal_syscall_start_result(-EIO);
+        g_jvm->DetachCurrentThread();
+        return nullptr;
+    }
+    YGG_SLOGI("listener thread attached, entering read loop (pid=%d tid=%d)",
+              getpid(), gettid());
+    signal_syscall_start_result(0);
+
+    struct ygg_syscall_event_record record = {};
+    struct ygg_syscall_read_event_request req = {};
+    const struct timespec delay = {0, 100000000L};
+    req.size = sizeof(req);
+    req.version = YGG_SYSCALL_ABI_VERSION;
+    req.buffer = (uint64_t)(uintptr_t)&record;
+    req.buffer_size = sizeof(record);
+    req.backtrace_buffer =
+        (uint64_t)(uintptr_t)&g_syscall_backtrace_record;
+    req.backtrace_buffer_size = sizeof(g_syscall_backtrace_record);
+    req.flags = YGG_SYSCALL_READ_F_LISTENER;
+
+    int listener_error = 0;
+    while (!g_syscall_stop.load()) {
+        memset(&record, 0, sizeof(record));
+        memset(&g_syscall_backtrace_record, 0,
+               sizeof(g_syscall_backtrace_record));
+        const long ret = prctl(PR_YGGDRASIL_SYSCALL_READ_EVENT, &req, 0, 0, 0);
+        if (ret < 0) {
+            const int read_error = errno;
+            // EAGAIN (empty queue) / EBUSY (concurrent read) are normal and
+            // happen every poll tick; do not log them or they will flood.
+            if (read_error == EAGAIN || read_error == EBUSY) {
+                nanosleep(&delay, nullptr);
+                continue;
+            }
+            if (read_error == EINTR) continue;
+            // EIO includes an invalid event/backtrace pair. The atomic reader
+            // leaves that slot queued, so retrying would loop on the same data.
+            YGG_SLOGE("read loop FATAL: prctl errno=%d -> stopping listener",
+                      read_error);
+            listener_error = -read_error;
+            break;
+        }
+        if (!is_valid_syscall_event(&record, ret)) {
+            // ABI mismatch between this native lib and the on-device KPM.
+            // Dump the header so the offending field is visible in logcat.
+            const struct ygg_syscall_event *ev = &record.event;
+            YGG_SLOGE("read loop INVALID event (errno=EPROTO/71): ret=%ld "
+                      "magic=0x%08x(exp 0x%08x) version=%u(exp %u) "
+                      "header_size=%u(exp %zu) total_size=%u payload_size=%u "
+                      "abi=%u phase=%u syscall_nr=%u capture_count=%u",
+                      ret, ev->magic, YGG_SYSCALL_EVENT_MAGIC,
+                      ev->version, YGG_SYSCALL_EVENT_VERSION,
+                      ev->header_size, sizeof(*ev), ev->total_size,
+                      ev->payload_size, ev->abi, ev->phase, ev->syscall_nr,
+                      ev->capture_count);
+            listener_error = -EPROTO;
+            break;
+        }
+
+        const struct ygg_syscall_event *event = &record.event;
+        const bool has_backtrace =
+            event->event_flags & YGG_SYSCALL_EVENT_F_HAS_BACKTRACE;
+        const struct ygg_syscall_backtrace_event *backtrace =
+            has_backtrace ? &g_syscall_backtrace_record.event : nullptr;
+        if (has_backtrace &&
+            !is_valid_syscall_backtrace(
+                &g_syscall_backtrace_record,
+                g_syscall_backtrace_record.event.total_size,
+                event->call_id, event->phase)) {
+            const struct ygg_syscall_backtrace_event *bt =
+                &g_syscall_backtrace_record.event;
+            YGG_SLOGE("read loop INVALID backtrace (errno=EPROTO/71): "
+                      "magic=0x%08x(exp 0x%08x) version=%u(exp %u) "
+                      "header_size=%u(exp %zu) total_size=%u call=%" PRIu64
+                      "(exp %" PRIu64 ") phase=%u(exp %u)",
+                      bt->magic, YGG_SYSCALL_BACKTRACE_EVENT_MAGIC,
+                      bt->version, YGG_SYSCALL_BACKTRACE_EVENT_VERSION,
+                      bt->header_size, sizeof(*bt), bt->total_size,
+                      bt->call_id, event->call_id, bt->phase, event->phase);
+            listener_error = -EPROTO;
+            break;
+        }
+        const size_t comm_len = strnlen(event->comm, sizeof(event->comm));
+        const std::string comm_text(event->comm, comm_len);
+        jstring comm = env->NewStringUTF(comm_text.c_str());
+        if (!comm) {
+            env->ExceptionClear();
+            comm = env->NewStringUTF("<invalid comm>");
+        }
+        if (!comm) {
+            env->ExceptionClear();
+            continue;
+        }
+
+        jlongArray args_before = env->NewLongArray(YGG_SYSCALL_ARG_COUNT);
+        jlongArray args_after = env->NewLongArray(YGG_SYSCALL_ARG_COUNT);
+        if (!args_before || !args_after) {
+            env->ExceptionClear();
+            env->DeleteLocalRef(comm);
+            if (args_before) env->DeleteLocalRef(args_before);
+            if (args_after) env->DeleteLocalRef(args_after);
+            continue;
+        }
+        env->SetLongArrayRegion(
+            args_before, 0, YGG_SYSCALL_ARG_COUNT,
+            reinterpret_cast<const jlong *>(event->args_before));
+        env->SetLongArrayRegion(
+            args_after, 0, YGG_SYSCALL_ARG_COUNT,
+            reinterpret_cast<const jlong *>(event->args_after));
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            env->DeleteLocalRef(comm);
+            env->DeleteLocalRef(args_before);
+            env->DeleteLocalRef(args_after);
+            continue;
+        }
+        jbyteArray capture_payload = env->NewByteArray((jsize)event->payload_size);
+        if (!capture_payload) {
+            env->ExceptionClear();
+            env->DeleteLocalRef(comm);
+            env->DeleteLocalRef(args_before);
+            env->DeleteLocalRef(args_after);
+            continue;
+        }
+        if (event->payload_size > 0) {
+            env->SetByteArrayRegion(
+                capture_payload, 0, (jsize)event->payload_size,
+                reinterpret_cast<const jbyte *>(record.payload));
+            if (env->ExceptionCheck()) {
+                env->ExceptionClear();
+                env->DeleteLocalRef(comm);
+                env->DeleteLocalRef(args_before);
+                env->DeleteLocalRef(args_after);
+                env->DeleteLocalRef(capture_payload);
+                continue;
+            }
+        }
+
+        jint backtrace_flags = backtrace ? (jint)backtrace->flags : 0;
+        jlong backtrace_seq = backtrace ? (jlong)backtrace->seq : 0;
+        jlong backtrace_dropped = backtrace ? (jlong)backtrace->dropped : 0;
+        jlong backtrace_call_id = backtrace ? (jlong)backtrace->call_id : 0;
+        jint backtrace_phase = backtrace ? (jint)backtrace->phase : 0;
+        jint backtrace_tid = backtrace ? (jint)backtrace->tid : 0;
+        jint backtrace_tgid = backtrace ? (jint)backtrace->tgid : 0;
+        jint backtrace_syscall_nr = backtrace ? (jint)backtrace->syscall_nr : 0;
+        jint backtrace_stack_requested = backtrace ?
+            (jint)backtrace->stack_requested_size : 0;
+        jint backtrace_stack_copied = backtrace ?
+            (jint)backtrace->stack_copied_size : 0;
+        jlong backtrace_stack_addr = backtrace ?
+            (jlong)backtrace->stack_addr : 0;
+        jlongArray backtrace_regs = env->NewLongArray(backtrace ? 34 : 0);
+        jbyteArray backtrace_stack = env->NewByteArray(backtrace ?
+            (jsize)backtrace->stack_copied_size : 0);
+        if (!backtrace_regs || !backtrace_stack) {
+            env->ExceptionClear();
+            if (backtrace_regs) env->DeleteLocalRef(backtrace_regs);
+            if (backtrace_stack) env->DeleteLocalRef(backtrace_stack);
+            backtrace = nullptr;
+            backtrace_flags = 0;
+            backtrace_seq = backtrace_dropped = backtrace_call_id = 0;
+            backtrace_phase = backtrace_tid = backtrace_tgid = backtrace_syscall_nr = 0;
+            backtrace_stack_requested = backtrace_stack_copied = 0;
+            backtrace_stack_addr = 0;
+            backtrace_regs = env->NewLongArray(0);
+            backtrace_stack = env->NewByteArray(0);
+        }
+        if (backtrace) {
+            jlong values[34] = {};
+            memcpy(values, backtrace->regs.regs, sizeof(backtrace->regs.regs));
+            values[31] = (jlong)backtrace->regs.sp;
+            values[32] = (jlong)backtrace->regs.pc;
+            values[33] = (jlong)backtrace->regs.pstate;
+            env->SetLongArrayRegion(backtrace_regs, 0, 34, values);
+            if (backtrace->stack_copied_size > 0) {
+                env->SetByteArrayRegion(
+                    backtrace_stack, 0, (jsize)backtrace->stack_copied_size,
+                    reinterpret_cast<const jbyte *>(g_syscall_backtrace_record.stack));
+            }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+
+        const uint32_t target_id =
+            (event->rule_flags & YGG_SYSCALL_F_TARGET_UID) ?
+                event->target_uid : event->target_pid;
+        env->CallVoidMethod(
+            g_syscall_callback_ref, g_on_syscall_event_mid,
+            (jlong)event->seq, (jlong)event->dropped, (jlong)event->call_id,
+            (jint)event->phase, (jint)event->tid, (jint)event->tgid,
+            (jint)event->syscall_nr, (jint)event->event_flags,
+            (jint)event->rule_flags, (jlong)target_id,
+            comm, (jlong)event->user_cookie, (jlong)event->arg_mask,
+            args_before, args_after,
+            (jlong)event->return_before, (jlong)event->return_after,
+            (jint)event->capture_count, capture_payload,
+            backtrace_flags, backtrace_seq, backtrace_dropped, backtrace_call_id,
+            backtrace_phase, backtrace_tid, backtrace_tgid, backtrace_syscall_nr,
+            backtrace_stack_requested, backtrace_stack_copied, backtrace_stack_addr,
+            backtrace_regs, backtrace_stack);
+        if (env->ExceptionCheck()) env->ExceptionClear();
+
+        env->DeleteLocalRef(comm);
+        env->DeleteLocalRef(args_before);
+        env->DeleteLocalRef(args_after);
+        env->DeleteLocalRef(capture_payload);
+        env->DeleteLocalRef(backtrace_regs);
+        env->DeleteLocalRef(backtrace_stack);
+    }
+
+    if (listener_error && !g_syscall_stop.exchange(true)) {
+        notify_syscall_listener_failure(env, listener_error);
+    }
+    unregister_syscall_listener();
+    g_jvm->DetachCurrentThread();
+    return nullptr;
+}
+
+extern "C" JNIEXPORT jint JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallStartListen(
+        JNIEnv *env, jobject, jobject callback) {
+    if (!callback) return -EINVAL;
+
+    pthread_mutex_lock(&g_syscall_listen_mutex);
+    if (g_syscall_listen_thread && g_syscall_stop.load()) {
+        pthread_join(g_syscall_listen_thread, nullptr);
+        g_syscall_listen_thread = 0;
+        clear_syscall_callback(env);
+    }
+    if (g_syscall_listen_thread) {
+        pthread_mutex_unlock(&g_syscall_listen_mutex);
+        return 0;
+    }
+
+    jobject callback_ref = env->NewGlobalRef(callback);
+    if (!callback_ref) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        pthread_mutex_unlock(&g_syscall_listen_mutex);
+        return -ENOMEM;
+    }
+    jclass cls = env->GetObjectClass(callback_ref);
+    if (!cls) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteGlobalRef(callback_ref);
+        pthread_mutex_unlock(&g_syscall_listen_mutex);
+        return -EINVAL;
+    }
+    jmethodID on_event_mid = env->GetMethodID(
+        cls,
+        "onEvent",
+        "(JJJIIIIIIJLjava/lang/String;JJ[J[JJJI[BIJJJIIIIIIJ[J[B)V");
+    if (!on_event_mid) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteLocalRef(cls);
+        env->DeleteGlobalRef(callback_ref);
+        pthread_mutex_unlock(&g_syscall_listen_mutex);
+        return -EINVAL;
+    }
+    jmethodID on_listener_failure_mid = env->GetMethodID(
+        cls,
+        "onListenerFailure",
+        "(I)V");
+    env->DeleteLocalRef(cls);
+    if (!on_listener_failure_mid) {
+        if (env->ExceptionCheck()) env->ExceptionClear();
+        env->DeleteGlobalRef(callback_ref);
+        pthread_mutex_unlock(&g_syscall_listen_mutex);
+        return -EINVAL;
+    }
+
+    g_syscall_callback_ref = callback_ref;
+    g_on_syscall_event_mid = on_event_mid;
+    g_on_syscall_listener_failure_mid = on_listener_failure_mid;
+    g_syscall_stop.store(false);
+    g_syscall_start_pending = true;
+    g_syscall_start_result = -EIO;
+    const int create_error = pthread_create(
+        &g_syscall_listen_thread, nullptr, syscall_listen_thread, nullptr);
+    if (create_error != 0) {
+        g_syscall_listen_thread = 0;
+        g_syscall_start_pending = false;
+        clear_syscall_callback(env);
+        g_syscall_stop.store(true);
+        pthread_cond_broadcast(&g_syscall_start_cond);
+    } else {
+        while (g_syscall_start_pending) {
+            pthread_cond_wait(&g_syscall_start_cond, &g_syscall_listen_mutex);
+        }
+        if (g_syscall_start_result != 0) {
+            pthread_join(g_syscall_listen_thread, nullptr);
+            g_syscall_listen_thread = 0;
+            clear_syscall_callback(env);
+        }
+    }
+    pthread_mutex_unlock(&g_syscall_listen_mutex);
+    if (create_error != 0) {
+        YGG_SLOGE("syscallStartListen: pthread_create failed (errno=%d)",
+                  create_error);
+        return -create_error;
+    }
+    if (g_syscall_start_result != 0) {
+        YGG_SLOGE("syscallStartListen returning failure to Kotlin: errno=%d",
+                  -g_syscall_start_result);
+    } else {
+        YGG_SLOGI("syscallStartListen: listener started OK");
+    }
+    return (jint)g_syscall_start_result;
+}
+
+extern "C" JNIEXPORT void JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_syscallStopListen(
+        JNIEnv *env, jobject) {
+    pthread_mutex_lock(&g_syscall_listen_mutex);
+    g_syscall_stop.store(true);
+    if (g_syscall_listen_thread) {
+        pthread_join(g_syscall_listen_thread, nullptr);
+        g_syscall_listen_thread = 0;
+    }
+    clear_syscall_callback(env);
+    pthread_mutex_unlock(&g_syscall_listen_mutex);
 }
 
 struct EventRecord {
@@ -363,4 +1114,36 @@ Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_nativeHwbpResolveLibraryTarge
         return 0;
     }
     return static_cast<jlong>(address);
+}
+
+extern "C" JNIEXPORT jobjectArray JNICALL
+Java_ng1ok_yggdrasilmanager_native_YggdrasilNative_nativeHwbpListLibraries(
+        JNIEnv *env, jobject, jint pid, jstring mapsText) {
+    if (pid <= 0 || !mapsText) {
+        jclass exception_cls = env->FindClass("java/lang/IllegalArgumentException");
+        if (exception_cls) env->ThrowNew(exception_cls, "positive pid and mapsText are required");
+        return nullptr;
+    }
+    const char *maps_cstr = env->GetStringUTFChars(mapsText, nullptr);
+    if (!maps_cstr) return nullptr;
+    std::vector<std::string> names;
+    std::string error;
+    const bool ok = ygg_list_library_names(static_cast<uint32_t>(pid), maps_cstr, &names, &error);
+    env->ReleaseStringUTFChars(mapsText, maps_cstr);
+    if (!ok) {
+        jclass exception_cls = env->FindClass("java/lang/IllegalArgumentException");
+        if (exception_cls) env->ThrowNew(exception_cls, error.c_str());
+        return nullptr;
+    }
+    jclass string_cls = env->FindClass("java/lang/String");
+    if (!string_cls) return nullptr;
+    jobjectArray out = env->NewObjectArray(static_cast<jsize>(names.size()), string_cls, nullptr);
+    if (!out) return nullptr;
+    for (size_t i = 0; i < names.size(); ++i) {
+        jstring name = env->NewStringUTF(names[i].c_str());
+        if (!name) return nullptr;
+        env->SetObjectArrayElement(out, static_cast<jsize>(i), name);
+        env->DeleteLocalRef(name);
+    }
+    return out;
 }

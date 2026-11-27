@@ -17,11 +17,14 @@ import kotlinx.coroutines.test.setMain
 import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.yield
 import ng1ok.yggdrasilmanager.data.YggdrasilRepository
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledApp
+import ng1ok.yggdrasilmanager.data.hidedbg.InstalledAppsSource
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigDraft
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpConfigStore
 import ng1ok.yggdrasilmanager.data.hwbp.HwbpSavedConfig
 import ng1ok.yggdrasilmanager.data.model.HwbpEvent
 import ng1ok.yggdrasilmanager.data.model.HwbpObserveParams
+import ng1ok.yggdrasilmanager.data.model.ProcMapsSource
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpServer
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpServerBindings
 import ng1ok.yggdrasilmanager.ui.hwbp.HwbpServerFactory
@@ -43,6 +46,15 @@ class HwbpViewModelTest {
     private lateinit var bindings: HwbpServerBindings
     private lateinit var viewModel: HwbpViewModel
     private lateinit var configStore: FakeHwbpConfigStore
+    private val apps = listOf(InstalledApp("com.example.target", "Target", 1234, false))
+    private val mapsRequests = mutableListOf<Int>()
+    private val packageLibraryRequests = mutableListOf<String>()
+    private var packageRunning = true
+    private var packageLibraries: List<String> = listOf("libunloaded.so", "libapp.so", "libapp.so")
+    private var libraryMaps: String? = """
+        1000-2000 r-xp 00000000 00:00 0 /system/lib64/libalpha.so
+        2000-3000 r--p 00001000 00:00 0 /system/lib64/libalpha.so
+    """.trimIndent()
 
     @Before
     fun setup() {
@@ -58,8 +70,18 @@ class HwbpViewModelTest {
                 server
             },
             configStore = configStore,
-            packagePidResolver = HwbpPackagePidResolver { 4321 },
+            installedAppsSource = InstalledAppsSource { Result.success(apps) },
+            packagePidResolver = HwbpPackagePidResolver {
+                check(packageRunning) { "Package is not running" }
+                4321
+            },
+            mapsSource = ProcMapsSource { pid -> mapsRequests += pid; libraryMaps },
             libraryTargetResolver = HwbpLibraryTargetResolver { _, _, offset, _ -> 0x7a00000000L + offset },
+            libraryNamesResolver = { _, _ -> listOf("libembedded.so", "libalpha.so") },
+            packageLibraryNamesResolver = { packageName ->
+                packageLibraryRequests += packageName
+                packageLibraries
+            },
         )
     }
 
@@ -74,6 +96,44 @@ class HwbpViewModelTest {
 
         verify(exactly = 1) { repo.startEventStream() }
         assertTrue(server.running.value)
+    }
+
+    @Test
+    fun serverOptionsUsePackageFilesForAppsAndMapsForPids() = runTest {
+        assertEquals(apps, bindings.installedApps().getOrThrow())
+        assertEquals(listOf("libapp.so", "libunloaded.so"),
+            bindings.libraryNames("com.example.target", null).getOrThrow())
+        assertEquals(listOf("libalpha.so", "libembedded.so"), bindings.libraryNames(null, 7654).getOrThrow())
+        assertEquals(listOf("com.example.target"), packageLibraryRequests)
+        assertEquals(listOf(7654), mapsRequests)
+    }
+
+    @Test
+    fun stoppedAppLibrariesDoNotRequirePidResolutionOrReadableMaps() = runTest {
+        packageRunning = false
+        libraryMaps = null
+
+        assertEquals(listOf("libapp.so", "libunloaded.so"),
+            bindings.libraryNames("com.example.target", null).getOrThrow())
+        assertTrue(mapsRequests.isEmpty())
+    }
+
+    @Test
+    fun appWithoutNativeLibrariesDoesNotFallBackToProcessMaps() = runTest {
+        packageLibraries = emptyList()
+
+        assertEquals(emptyList<String>(), bindings.libraryNames("com.example.target", null).getOrThrow())
+        assertTrue(mapsRequests.isEmpty())
+    }
+
+    @Test
+    fun unreadableMapsAreReportedAsAnOptionLoadingFailure() = runTest {
+        libraryMaps = null
+
+        val result = bindings.libraryNames(null, 7654)
+
+        assertTrue(result.isFailure)
+        assertTrue(result.exceptionOrNull()?.message.orEmpty().contains("/proc/7654/maps"))
     }
 
     @Test

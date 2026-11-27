@@ -19,6 +19,7 @@ import ng1ok.yggdrasilmanager.ui.hwbp.decodeClientCommand
 import ng1ok.yggdrasilmanager.ui.hwbp.encodeAck
 import ng1ok.yggdrasilmanager.ui.hwbp.encodeEvent
 import ng1ok.yggdrasilmanager.ui.hwbp.encodeState
+import ng1ok.yggdrasilmanager.ui.hwbp.extractHwbpLibraryNames
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -34,6 +35,25 @@ class HwbpProtocolTest {
     }
     private val libraryResolver = HwbpLibraryTargetResolver { pid, library, offset, source ->
         ProcMaps.resolveLibraryTarget(pid, library, offset, source)
+    }
+
+    @Test
+    fun libraryChoicesDeduplicateSegmentsAndExcludeOtherMappedFiles() {
+        val libraries = extractHwbpLibraryNames(
+            """
+            1000-2000 r-xp 00000000 00:00 0 /system/lib64/libz.so
+            2000-3000 r--p 00001000 00:00 0 /system/lib64/libz.so
+            3000-4000 r-xp 00000000 00:00 0 /data/app/target/lib/arm64/libalpha.so (deleted)
+            4000-5000 r-xp 00000000 00:00 0 /data/app/target/base.apk!/lib/arm64-v8a/libalpha.so
+            5000-6000 r-xp 00000000 00:00 0 /system/lib64/libversioned.so.1
+            6000-7000 r--p 00000000 00:00 0 /data/app/target/base.apk
+            7000-8000 r--p 00000000 00:00 0 /system/fonts/a.ttf
+            8000-9000 rw-p 00000000 00:00 0 [anon:libc_malloc]
+            9000-a000 r--p 00000000 00:00 0 /data/libname.something
+            """.trimIndent()
+        )
+
+        assertEquals(listOf("libalpha.so", "libversioned.so.1", "libz.so"), libraries)
     }
 
     @Test
