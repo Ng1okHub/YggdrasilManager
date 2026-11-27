@@ -4,7 +4,7 @@
 
 Manager 版本遵循語意化版本規範（SemVer），與 Yggdrasil KPM 模組版本分開管理。Android 更新順序由 `version.properties` 中獨立且遞增的 `versionCode` 決定。
 
-## [尚未發佈]
+## [1.0.0] - 2026-11-27
 
 - 管理 arm64 系統呼叫觀察、硬體斷點、Hide DBG 與 Hide Maps。
 - 提供瀏覽器控制台，檢視系統呼叫與 HWBP 事件及呼叫堆疊。
