@@ -1,14 +1,18 @@
 version: 2
+# Disable routine version-update PRs without changing security-update settings.
 updates:
   - package-ecosystem: github-actions
     directory: /
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
   - package-ecosystem: gradle
     directory: /
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly
   - package-ecosystem: npm
     directory: /frontend
+    open-pull-requests-limit: 0
     schedule:
       interval: weekly

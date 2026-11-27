@@ -137,7 +137,7 @@ The setup is already completed for `ngiokweng/YggdrasilManager`. Do not upload `
 | `CI` | Branch pushes, PRs and manual runs | Version tests, npm audit, frontend tests/build, Android tests, debug/release lint and APK compilation; uploads debug APK and reports. |
 | `Release` | `v*` tags; manual reruns from a tag | Checks tag/version agreement, runs tests/audit/lint, builds with the private key, verifies the certificate and 16 KB ZIP alignment, then publishes APK, certificate and checksums to a GitHub release. |
 
-PRs, including forks, generate disposable signing keys and need no release secrets. The CI release APK is only a compilation check and is not distributed. Actions are pinned to commit SHAs; Dependabot checks Actions, Gradle and npm dependencies weekly.
+PRs, including forks, generate disposable signing keys and need no release secrets. The CI release APK is only a compilation check and is not distributed. Actions are pinned to commit SHAs. Dependabot version-update PRs for Actions, Gradle and npm are disabled with `open-pull-requests-limit: 0`; security-update settings are unchanged.
 
 ## Publishing
 

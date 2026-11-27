@@ -139,7 +139,7 @@ Fork 請使用自己的 `OWNER/REPOSITORY`。腳本透過標準輸入傳送數�
 | `CI` | 分支推送、PR 與手動執行 | 版本測試、npm audit、前端測試與建置、Android 測試、debug／release lint 與 APK 編譯；上傳 debug APK 與報告。 |
 | `Release` | `v*` 標籤；以標籤手動重跑 | 檢查標籤與版本一致，執行測試、audit 與 lint，使用私鑰建置，驗證憑證與 16 KB ZIP 對齊，再將 APK、憑證與校驗檔發佈到 GitHub release。 |
 
-PR（含 fork）會產生臨時簽名金鑰，不需要正式 Secrets。CI 的 release APK 僅用於編譯檢查，不對外分發。Actions 以 commit SHA 固定版本；Dependabot 每週檢查 Actions、Gradle 與 npm 相依套件。
+PR（含 fork）會產生臨時簽名金鑰，不需要正式 Secrets。CI 的 release APK 僅用於編譯檢查，不對外分發。Actions 以 commit SHA 固定版本。Dependabot 的 Actions、Gradle 與 npm version-update PR 已透過 `open-pull-requests-limit: 0` 停用；security updates 的設定維持不變。
 
 ## 發佈
 
