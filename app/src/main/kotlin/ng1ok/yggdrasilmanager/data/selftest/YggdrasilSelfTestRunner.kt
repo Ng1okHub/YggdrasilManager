@@ -183,7 +183,7 @@ class YggdrasilSelfTestRunner(context: Context) : SelfTestRunner {
 
     override fun requestCancel() {
         cancelRequested = true
-        activeProcess?.destroyForcibly()
+        activeProcess?.terminateCompat()
     }
 
     private suspend fun rootShell(): Shell {
@@ -231,7 +231,7 @@ class YggdrasilSelfTestRunner(context: Context) : SelfTestRunner {
 
         try {
             process.outputStream.use { output -> output.write(payload) }
-            if (!process.waitFor(DEPLOY_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
+            if (!process.waitForCompat(DEPLOY_TIMEOUT_SECONDS, TimeUnit.SECONDS)) {
                 throw IOException("部署逾時")
             }
             if (process.exitValue() != 0) {
@@ -243,7 +243,7 @@ class YggdrasilSelfTestRunner(context: Context) : SelfTestRunner {
                 )
             }
         } finally {
-            if (process.isAlive) process.destroyForcibly()
+            process.terminateCompat()
         }
 
         val verify = runCatching {
@@ -284,7 +284,7 @@ class YggdrasilSelfTestRunner(context: Context) : SelfTestRunner {
             }
             return process.waitFor()
         } finally {
-            if (process.isAlive) process.destroyForcibly()
+            process.terminateCompat()
             activeProcess = null
         }
     }
@@ -305,6 +305,32 @@ class YggdrasilSelfTestRunner(context: Context) : SelfTestRunner {
             val reset = shell.newJob()
             reset.add("$DEVICE_PATH $CLEANUP_FILTER")
             reset.exec()
+        }
+    }
+
+    private fun Process.terminateCompat() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            destroyForcibly()
+        } else {
+            destroy()
+        }
+    }
+
+    private fun Process.waitForCompat(timeout: Long, unit: TimeUnit): Boolean {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            return waitFor(timeout, unit)
+        }
+        // API 24/25 have no timed waitFor; poll without leaving an unbounded waiting thread behind.
+        val deadline = SystemClock.elapsedRealtime() + unit.toMillis(timeout)
+        while (true) {
+            try {
+                exitValue()
+                return true
+            } catch (_: IllegalThreadStateException) {
+                val remaining = deadline - SystemClock.elapsedRealtime()
+                if (remaining <= 0) return false
+                Thread.sleep(minOf(50L, remaining))
+            }
         }
     }
 
