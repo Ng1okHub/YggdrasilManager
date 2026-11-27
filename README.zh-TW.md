@@ -5,7 +5,7 @@
 
 <h1>YggdrasilManager</h1>
 
-![CI](https://github.com/ngiokweng/YggdrasilManager/workflows/CI/badge.svg)
+![CI](https://github.com/Ng1okHub/YggdrasilManager/actions/workflows/ci.yml/badge.svg?branch=master)
 
 </div>
 
